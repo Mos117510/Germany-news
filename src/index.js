@@ -869,3 +869,443 @@ async function translateSaved(
 }
   }
 }
+const refreshTimes = new Map();
+const translateTimes = new Map();
+
+function refreshAllowed(request) {
+  const key =
+    request.headers.get('CF-Connecting-IP') ||
+    'global';
+
+  const now = Date.now();
+  const last = refreshTimes.get(key) || 0;
+
+  if (now - last < 30_000) {
+    return false;
+  }
+
+  refreshTimes.set(key, now);
+
+  if (refreshTimes.size > 5000) {
+    for (const [k, v] of refreshTimes) {
+      if (now - v > 300_000) {
+        refreshTimes.delete(k);
+      }
+    }
+  }
+
+  return true;
+}
+
+async function api(request, env) {
+  const url = new URL(request.url);
+  const day = todayBerlin();
+
+  if (
+    request.method === 'GET' &&
+    url.pathname === '/api/history'
+  ) {
+    const rows = await env.DB
+      .prepare(
+        'SELECT day,overview,sections_json,articles_json,updated_at FROM daily_updates ORDER BY day DESC LIMIT 60'
+      )
+      .all();
+
+    return Response.json(
+      rows.results.map(r => ({
+        ...r,
+        sections: JSON.parse(r.sections_json),
+        articles: JSON.parse(r.articles_json)
+      }))
+    );
+  }
+
+  if (
+    request.method === 'GET' &&
+    url.pathname === '/api/today'
+  ) {
+    const r = await env.DB
+      .prepare(
+        'SELECT * FROM daily_updates WHERE day=?'
+      )
+      .bind(day)
+      .first();
+
+    return Response.json(
+      r
+        ? {
+            ...r,
+            sections: JSON.parse(r.sections_json),
+            articles: JSON.parse(r.articles_json)
+          }
+        : null
+    );
+  }
+
+  if (
+    request.method === 'GET' &&
+    (
+      url.pathname === '/api/weekly' ||
+      url.pathname === '/api/monthly'
+    )
+  ) {
+    const type =
+      url.pathname === '/api/weekly'
+        ? 'weekly'
+        : 'monthly';
+
+    const key = periodKey(type, day);
+
+    const r = await env.DB
+      .prepare(
+        'SELECT * FROM period_updates WHERE type=? AND period_key=?'
+      )
+      .bind(type, key)
+      .first();
+
+    return Response.json(
+      r
+        ? {
+            ...r,
+            sections: JSON.parse(r.sections_json),
+            days: JSON.parse(r.days_json)
+          }
+        : null
+    );
+  }
+
+  if (
+    request.method === 'POST' &&
+    (
+      url.pathname === '/api/weekly' ||
+      url.pathname === '/api/monthly'
+    )
+  ) {
+    if (!refreshAllowed(request)) {
+      return Response.json(
+        {
+          error:
+            'Bitte kurz warten und dann erneut aktualisieren.'
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': '30'
+          }
+        }
+      );
+    }
+
+    const type =
+      url.pathname === '/api/weekly'
+        ? 'weekly'
+        : 'monthly';
+
+    const data = await buildPeriod(
+      env,
+      type,
+      day
+    );
+
+    if (data.noNews) {
+      return Response.json(data);
+    }
+
+    const now =
+      new Date().toISOString();
+
+    await env.DB
+      .prepare(
+        `INSERT INTO period_updates(
+          type,
+          period_key,
+          overview,
+          sections_json,
+          days_json,
+          updated_at
+        )
+        VALUES(?,?,?,?,?,?)
+        ON CONFLICT(type,period_key)
+        DO UPDATE SET
+          overview=excluded.overview,
+          sections_json=excluded.sections_json,
+          days_json=excluded.days_json,
+          updated_at=excluded.updated_at`
+      )
+      .bind(
+        type,
+        data.key,
+        data.overview,
+        JSON.stringify(data.sections),
+        JSON.stringify(data.days),
+        now
+      )
+      .run();
+
+    return Response.json({
+      ...data,
+      updated_at: now
+    });
+  }
+
+  if (
+    request.method === 'POST' &&
+    url.pathname === '/api/translate'
+  ) {
+    const ipKey =
+      request.headers.get('CF-Connecting-IP') ||
+      'global';
+
+    const now = Date.now();
+    const last =
+      translateTimes.get(ipKey) || 0;
+
+    if (now - last < 3000) {
+      return Response.json(
+        {
+          error: 'Bitte kurz warten.'
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': '3'
+          }
+        }
+      );
+    }
+
+    translateTimes.set(
+      ipKey,
+      now
+    );
+
+    if (translateTimes.size > 5000) {
+      for (const [k, v] of translateTimes) {
+        if (now - v > 300000) {
+          translateTimes.delete(k);
+        }
+      }
+    }
+
+    let body = {};
+
+    try {
+      body = await request.json();
+    } catch {}
+
+    const language =
+      String(body.language || '');
+
+    const type =
+      String(body.type || 'daily');
+
+    const key =
+      String(body.key || day);
+
+    if (
+      !LANGS.has(language) ||
+      ![
+        'daily',
+        'weekly',
+        'monthly'
+      ].includes(type)
+    ) {
+      return Response.json(
+        {
+          error:
+            'Ungültige Sprache oder Ansicht.'
+        },
+        {
+          status: 400
+        }
+      );
+    }
+
+    return Response.json(
+      await translateSaved(
+        env,
+        type,
+        key,
+        language
+      )
+    );
+  }
+
+  if (
+    request.method === 'POST' &&
+    url.pathname === '/api/refresh'
+  ) {
+    if (!refreshAllowed(request)) {
+      return Response.json(
+        {
+          error:
+            'Bitte kurz warten und dann erneut aktualisieren.'
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': '30'
+          }
+        }
+      );
+    }
+
+    const prev = await env.DB
+      .prepare(
+        'SELECT * FROM daily_updates WHERE day=?'
+      )
+      .bind(day)
+      .first();
+
+    const old = prev
+      ? {
+          articles:
+            JSON.parse(
+              prev.articles_json
+            )
+        }
+      : null;
+
+    const data =
+      await buildUpdate(
+        env,
+        day,
+        old
+      );
+
+    if (data.noNews) {
+      return Response.json(
+        {
+          day,
+          ...data
+        },
+        {
+          status: 200
+        }
+      );
+    }
+
+    const now =
+      new Date().toISOString();
+
+    await env.DB
+      .prepare(
+        `INSERT INTO daily_updates(
+          day,
+          overview,
+          sections_json,
+          articles_json,
+          updated_at
+        )
+        VALUES(?,?,?,?,?)
+        ON CONFLICT(day)
+        DO UPDATE SET
+          overview=excluded.overview,
+          sections_json=excluded.sections_json,
+          articles_json=excluded.articles_json,
+          updated_at=excluded.updated_at`
+      )
+      .bind(
+        day,
+        data.overview,
+        JSON.stringify(data.sections),
+        JSON.stringify(data.articles),
+        now
+      )
+      .run();
+
+    return Response.json({
+      day,
+      ...data,
+      updated_at: now
+    });
+  }
+
+  return null;
+}
+
+function secureHeaders(
+  headers = new Headers()
+) {
+  headers.set(
+    'X-Content-Type-Options',
+    'nosniff'
+  );
+
+  headers.set(
+    'X-Frame-Options',
+    'DENY'
+  );
+
+  headers.set(
+    'Referrer-Policy',
+    'no-referrer'
+  );
+
+  headers.set(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=()'
+  );
+
+  headers.set(
+    'Cross-Origin-Opener-Policy',
+    'same-origin'
+  );
+
+  headers.set(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+  );
+
+  return headers;
+}
+
+function withSecurity(response) {
+  const headers =
+    secureHeaders(
+      new Headers(
+        response.headers
+      )
+    );
+
+  return new Response(
+    response.body,
+    {
+      status: response.status,
+      statusText:
+        response.statusText,
+      headers
+    }
+  );
+}
+
+export default {
+  async fetch(request, env) {
+    try {
+      const r =
+        await api(request, env);
+
+      if (r) {
+        return withSecurity(r);
+      }
+
+      return withSecurity(
+        await env.ASSETS.fetch(
+          request
+        )
+      );
+    } catch (e) {
+      return withSecurity(
+        Response.json(
+          {
+            error:
+              'Interner Fehler. Bitte später erneut versuchen.'
+          },
+          {
+            status: 500
+          }
+        )
+      );
+    }
+  }
+}
