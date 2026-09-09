@@ -1,4 +1,3 @@
-````javascript
 const TAGESSCHAU_FEED = 'https://www.tagesschau.de/index~rss2.xml';
 const ZDF_HOME = 'https://www.zdfheute.de/';
 const ALLOWED = ['tagesschau.de', 'zdfheute.de', 'zdf.de'];
