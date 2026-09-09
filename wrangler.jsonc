@@ -7,4 +7,17 @@
     { "binding": "DB", "database_name": "deutschland-news", "database_id": "936514c0-b27e-4900-a696-8369da716bc9" }
   ],
   "ai": { "binding": "AI" }
+},
+"observability": {
+  "logs": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "invocation_logs": true,
+    "persist": true
+  },
+  "traces": {
+    "enabled": false,
+    "head_sampling_rate": 1,
+    "persist": true
+  }
 }
