@@ -2,22 +2,31 @@
   "name": "germany-news",
   "main": "src/index.js",
   "compatibility_date": "2026-09-09",
-  "assets": { "directory": "./public", "binding": "ASSETS" },
-  "d1_databases": [
-    { "binding": "DB", "database_name": "deutschland-news", "database_id": "936514c0-b27e-4900-a696-8369da716bc9" }
-  ],
-  "ai": { "binding": "AI" }
-},
-"observability": {
-  "logs": {
-    "enabled": true,
-    "head_sampling_rate": 1,
-    "invocation_logs": true,
-    "persist": true
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
   },
-  "traces": {
-    "enabled": false,
-    "head_sampling_rate": 1,
-    "persist": true
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "deutschland-news",
+      "database_id": "936514c0-b27e-4900-a696-8369da716bc9"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
   }
 }
