@@ -1,39 +1,121 @@
-const TAGESSCHAU_FEED = 'https://www.tagesschau.de/index~rss2.xml';
-const ZDF_HOME = 'https://www.zdfheute.de/';
-const ALLOWED = ['tagesschau.de', 'zdfheute.de', 'zdf.de'];
+````js
+async function buildUpdate(env, day, previous){
+  let ts=[], zdf=[]; 
+  const failures=[];
 
-function todayBerlin() {
-  return new Intl.DateTimeFormat('de-DE', { timeZone: 'Europe/Berlin', year:'numeric', month:'2-digit', day:'2-digit' })
-    .format(new Date()).split('.').reverse().join('-');
-}
-function esc(s='') { return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function clean(s='') { return s.replace(/\s+/g,' ').replace(/\u00a0/g,' ').trim(); }
-function allowedUrl(u) {
-  try {
-    const x=new URL(u);
-    return x.protocol==='https:' && !x.username && !x.password && ALLOWED.some(d=>x.hostname===d || x.hostname.endsWith('.'+d));
-  } catch { return false; }
-}
-function absUrl(base, href) { try { const u=new URL(href,base); return allowedUrl(u) ? u.href : null; } catch { return null; } }
+  // Fetch both permitted sources in parallel.
+  const results = await Promise.allSettled([
+    rssItems(),
+    zdfLinks()
+  ]);
 
-const UA='Deutschland-News-Update/1.0';
-const MAX_FEED_BYTES=900_000;
-const MAX_ARTICLE_BYTES=1_800_000;
+  if(results[0].status === 'fulfilled') {
+    ts = results[0].value;
+  } else {
+    failures.push('tagesschau.de');
+  }
 
-async function readTextLimited(response, maxBytes) {
-  const len=Number(response.headers.get('content-length')||0);
-  if (len && len>maxBytes) throw new Error('Quelle zu groß');
-  if (!response.body) return '';
-  const reader=response.body.getReader();
-  const chunks=[]; let total=0;
-  try {
-    while(true){
-      const {done,value}=await reader.read();
-      if(done) break;
-      total+=value.byteLength;
-      if(total>maxBytes){try{await reader.cancel();}catch{} throw new Error('Quelle zu groß');}
-      chunks.push(value);
+  if(results[1].status === 'fulfilled') {
+    zdf = results[1].value;
+  } else {
+    failures.push('zdfheute.de');
+  }
+
+  // If both permitted sources are unavailable, do not generate or overwrite anything.
+  if(failures.length === 2) {
+    return {
+      noNews: true,
+      message: previous ? 'No New News yet' : 'No News',
+      failures
+    };
+  }
+
+  const raw = unique([
+    ...ts.slice(0, 10),
+    ...zdf.slice(0, 10)
+  ]);
+
+  if(!raw.length) {
+    return {
+      noNews: true,
+      message: previous ? 'No New News yet' : 'No News',
+      failures
+    };
+  }
+
+  /*
+   * Fetch article pages concurrently instead of sequentially.
+   * This is the main performance improvement.
+   */
+  const selected = raw.slice(0, 14);
+
+  const enriched = await Promise.all(
+    selected.map(item => articleExtract(item))
+  );
+
+  const oldLinks = new Set(
+    (previous?.articles || []).map(x => x.link)
+  );
+
+  const ai = await env.AI.run(
+    '@cf/google/gemma-4-26b-a4b-it',
+    {
+      messages: [
+        {
+          role: 'user',
+          content: promptFor(enriched, day)
+        }
+      ]
     }
+  );
+
+  let text = ai?.response || '';
+  text = text
+    .replace(/^```json\s*|\s*```$/g, '')
+    .trim();
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      'Die KI-Antwort war kein gültiges JSON. Bitte erneut aktualisieren.'
+    );
+  }
+
+  const allArticles = enriched.map(a => ({
+    source: a.source,
+    title: a.title,
+    link: a.link
+  }));
+
+  const allowedLinks = new Set(
+    allArticles.map(a => a.link)
+  );
+
+  data = cleanAiData(data, allowedLinks);
+
+  /*
+   * Mark an item as NEW when at least one of its source URLs
+   * was not present in the previous daily update.
+   */
+  const marked = data.sections.map(section => ({
+    ...section,
+    items: section.items.map(item => ({
+      ...item,
+      new: item.urls.some(url => !oldLinks.has(url))
+    }))
+  }));
+
+  return {
+    overview: data.overview || '',
+    sections: marked,
+    articles: allArticles,
+    failures
+  };
+}
+````
   } finally { try{reader.releaseLock();}catch{} }
   const all=new Uint8Array(total); let pos=0;
   for(const c of chunks){all.set(c,pos);pos+=c.byteLength;}
