@@ -316,6 +316,7 @@ async function buildUpdate(env, day, previous) {
   if (sourceResults[1].status === 'fulfilled') zdf = sourceResults[1].value;
   else failures.push('zdfheute.de');
 
+  // If both failed → no news
   if (failures.length === 2) {
     return {
       noNews: true,
@@ -326,9 +327,12 @@ async function buildUpdate(env, day, previous) {
 
   // Enrich ZDF
   const tsReady = ts.map(a => ({ ...a, content: a.description }));
-  const zdfEnriched = await Promise.all(zdf.slice(0, MAX_ZDF_ENRICHED).map(item => articleExtract(item)));
+  const zdfEnriched = await Promise.all(
+    zdf.slice(0, MAX_ZDF_ENRICHED).map(item => articleExtract(item))
+  );
 
   const raw = unique([...tsReady, ...zdfEnriched]);
+
   if (!raw.length) {
     return {
       noNews: true,
@@ -337,21 +341,44 @@ async function buildUpdate(env, day, previous) {
     };
   }
 
-  // AI
+  // ---------- AI ----------
   const ai = await env.AI.run('@cf/meta/llama-3-8b-instruct', {
     messages: [{ role: 'user', content: promptFor(raw, day) }]
   });
 
-  let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
+  let text = (ai?.response || '').trim();
+
+  // KI liefert nichts
+  if (!text) {
+    return {
+      noNews: true,
+      message: 'KI lieferte keine Antwort.',
+      failures
+    };
+  }
+
+  // Codeblock entfernen
+  text = text.replace(/^```json\s*|\s*```$/g, '').trim();
 
   let data;
   try {
     data = JSON.parse(text);
-  } catch {
-    throw new Error('Die KI-Antwort war kein gültiges JSON.');
+  } catch (err) {
+    return {
+      noNews: true,
+      message: 'KI-Antwort war kein gültiges JSON.',
+      failures,
+      rawAiResponse: text
+    };
   }
 
-  const allArticles = raw.map(a => ({ source: a.source, title: a.title, link: a.link }));
+  // ---------- CLEAN ----------
+  const allArticles = raw.map(a => ({
+    source: a.source,
+    title: a.title,
+    link: a.link
+  }));
+
   const allowedLinks = new Set(allArticles.map(a => a.link));
 
   data = cleanAiData(data, allowedLinks);
@@ -372,7 +399,8 @@ async function buildUpdate(env, day, previous) {
     articles: allArticles,
     failures
   };
-                               }
+}
+
 // ======================================================
 // TEIL 2 — Perioden-Logik & Übersetzungen (FREE PLAN)
 // ======================================================
