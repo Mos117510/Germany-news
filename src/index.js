@@ -132,41 +132,175 @@ function promptFor(articles, day){
 }
 
 async function buildUpdate(env, day, previous){
+  const totalStart = performance.now();
+
   let ts=[], zdf=[]; const failures=[];
 
-  const sourceResults = await Promise.allSettled([rssItems(), zdfLinks()]);
-  if(sourceResults[0].status==='fulfilled') ts=sourceResults[0].value; else failures.push('tagesschau.de');
-  if(sourceResults[1].status==='fulfilled') zdf=sourceResults[1].value; else failures.push('zdfheute.de');
+  // 1. Tagesschau + ZDF-Startseite
+  const sourcesStart = performance.now();
 
-  if (failures.length === 2) return {noNews:true, message: previous ? 'No New News yet' : 'No News', failures};
+  const sourceResults = await Promise.allSettled([
+    rssItems(),
+    zdfLinks()
+  ]);
 
-  const tsReady = ts.map(a=>({...a, content:a.description}));
+  const sourcesTime = performance.now() - sourcesStart;
+
+  if(sourceResults[0].status==='fulfilled') {
+    ts=sourceResults[0].value;
+  } else {
+    failures.push('tagesschau.de');
+  }
+
+  if(sourceResults[1].status==='fulfilled') {
+    zdf=sourceResults[1].value;
+  } else {
+    failures.push('zdfheute.de');
+  }
+
+  if (failures.length === 2) {
+    return {
+      noNews:true,
+      message: previous ? 'No New News yet' : 'No News',
+      failures,
+      timing:{
+        sources: Math.round(sourcesTime),
+        total: Math.round(performance.now() - totalStart)
+      }
+    };
+  }
+
+  // 2. ZDF-Artikel
+  const zdfStart = performance.now();
+
+  const tsReady = ts.map(a=>({
+    ...a,
+    content:a.description
+  }));
 
   const zdfEnriched = await Promise.all(
-  zdf.slice(0, 6).map(item => articleExtract(item))
-);
-  const raw = unique([...tsReady, ...zdfEnriched]);
-  if (!raw.length) return {noNews:true, message: previous ? 'No New News yet' : 'No News', failures};
+    zdf.slice(0, 6).map(item => articleExtract(item))
+  );
 
-  const oldLinks=new Set((previous?.articles||[]).map(x=>x.link));
-  const ai=await env.AI.run('@cf/google/gemma-4-26b-a4b-it',{messages:[{role:'user',content:promptFor(raw,day)}]});
-  let text=ai?.response||''; text=text.replace(/^```json\s*|\s*```$/g,'').trim();
-  let data; try{data=JSON.parse(text);}catch{throw new Error('Die KI-Antwort war kein gültiges JSON. Bitte erneut aktualisieren.');}
-  const allArticles=raw.map(a=>({source:a.source,title:a.title,link:a.link}));
-  const allowedLinks=new Set(allArticles.map(a=>a.link));
+  const zdfTime = performance.now() - zdfStart;
+
+  const raw = unique([...tsReady, ...zdfEnriched]);
+
+  if (!raw.length) {
+    return {
+      noNews:true,
+      message: previous ? 'No New News yet' : 'No News',
+      failures,
+      timing:{
+        sources: Math.round(sourcesTime),
+        zdfArticles: Math.round(zdfTime),
+        total: Math.round(performance.now() - totalStart)
+      }
+    };
+  }
+
+  // 3. KI
+  const aiStart = performance.now();
+
+  const oldLinks=new Set(
+    (previous?.articles||[]).map(x=>x.link)
+  );
+
+  const ai=await env.AI.run(
+    '@cf/google/gemma-4-26b-a4b-it',
+    {
+      messages:[
+        {
+          role:'user',
+          content:promptFor(raw,day)
+        }
+      ]
+    }
+  );
+
+  const aiTime = performance.now() - aiStart;
+
+  // 4. KI-Antwort verarbeiten
+  const parseStart = performance.now();
+
+  let text=ai?.response||'';
+  text=text.replace(/^```json\s*|\s*```$/g,'').trim();
+
+  let data;
+  try {
+    data=JSON.parse(text);
+  } catch {
+    throw new Error(
+      'Die KI-Antwort war kein gültiges JSON. Bitte erneut aktualisieren.'
+    );
+  }
+
+  const allArticles=raw.map(a=>({
+    source:a.source,
+    title:a.title,
+    link:a.link
+  }));
+
+  const allowedLinks=new Set(
+    allArticles.map(a=>a.link)
+  );
+
   data=cleanAiData(data,allowedLinks);
-  const marked=data.sections.map(s=>({...s,items:s.items.map(it=>({...it,new: it.urls.some(u=>!oldLinks.has(u))}))}));
-  return {overview:data.overview||'',sections:marked,articles:allArticles,failures};
+
+  const marked=data.sections.map(s=>({
+    ...s,
+    items:s.items.map(it=>({
+      ...it,
+      new:it.urls.some(u=>!oldLinks.has(u))
+    }))
+  }));
+
+  const parseTime = performance.now() - parseStart;
+  const totalTime = performance.now() - totalStart;
+
+  // Messwerte in den Cloudflare-Logs
+  console.log('Deutschland-News-Update Timing:', {
+    sources: Math.round(sourcesTime) + ' ms',
+    zdfArticles: Math.round(zdfTime) + ' ms',
+    ai: Math.round(aiTime) + ' ms',
+    parse: Math.round(parseTime) + ' ms',
+    total: Math.round(totalTime) + ' ms',
+    tagesschauArticles: ts.length,
+    zdfArticlesFound: zdf.length,
+    totalArticles: raw.length
+  });
+
+  return {
+    overview:data.overview||'',
+    sections:marked,
+    articles:allArticles,
+    failures,
+
+    // Temporär für unseren Test
+    timing:{
+      sources:Math.round(sourcesTime),
+      zdfArticles:Math.round(zdfTime),
+      ai:Math.round(aiTime),
+      parse:Math.round(parseTime),
+      total:Math.round(totalTime)
+    }
+  };
 }
 
 function periodKey(type, day){
   const [y,m,d]=day.split('-').map(Number);
+
   if(type==='weekly'){
     const dt=new Date(Date.UTC(y,m-1,d));
     const dayNum=dt.getUTCDay()||7;
-    dt.setUTCDate(dt.getUTCDate()-dayNum+1);
+
+    dt.setUTCDate(
+      dt.getUTCDate()-dayNum+1
+    );
+
     return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()+1).padStart(2,'0')}-${String(dt.getUTCDate()).padStart(2,'0')}`;
   }
+
   return `${y}-${String(m).padStart(2,'0')}`;
 }
 function periodDates(type, day){
