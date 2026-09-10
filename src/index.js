@@ -109,7 +109,8 @@ async function zdfLinks() {
     if(!(e instanceof EnoughLinks)) throw e;
   }
   return out.slice(0,MAX_ZDF_ENRICHED);
-} {
+} 
+{
   const r=await safeFetch(ZDF_HOME,MAX_HOME_BYTES);
   if(!r.ok) throw new Error('zdfheute.de nicht erreichbar');
   const html=await readTextLimited(r,MAX_HOME_BYTES);
@@ -161,7 +162,8 @@ async function articleExtract(item) {
     }
     return {...item,description:clean(desc)||item.description,content:paras.slice(0,6).join(' ')};
   } catch { return item; }
-} {
+}
+{
   try {
     if(!allowedUrl(item.link)) return item;
     const r=await safeFetch(item.link,MAX_ARTICLE_BYTES);
