@@ -780,22 +780,24 @@ async function api(request, env) {
   }
 
   // TODAY
-  if ((request.method === 'POST' || request.method === 'GET') && url.pathname === '/api/refresh') {
-    const r = await env.DB
-      .prepare('SELECT * FROM daily_updates WHERE day=?')
-      .bind(day)
-      .first();
+  // TODAY
+if (request.method === 'GET' && url.pathname === '/api/today') {
+  const r = await env.DB
+    .prepare('SELECT * FROM daily_updates WHERE day=?')
+    .bind(day)
+    .first();
 
-    return json(
-      r
-        ? {
-            ...r,
-            sections: JSON.parse(r.sections_json),
-            articles: JSON.parse(r.articles_json)
-          }
-        : null
-    );
-  }
+  return json(
+    r
+      ? {
+          ...r,
+          sections: JSON.parse(r.sections_json),
+          articles: JSON.parse(r.articles_json)
+        }
+      : null
+  );
+}
+
 
   // WEEKLY / MONTHLY GET
   if (request.method === 'GET' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
