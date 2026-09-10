@@ -726,7 +726,8 @@ async function api(request, env) {
   const url = new URL(request.url);
   const day = todayBerlin();
 // DAILY REFRESH
-if (request.method === 'POST' && url.pathname === '/api/refresh') {
+  if ((request.method === 'POST' || request.method === 'GET') && url.pathname === '/api/refresh')
+ {
   if (!refreshAllowed(request)) {
     return json(
       { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
