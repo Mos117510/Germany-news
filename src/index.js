@@ -142,8 +142,9 @@ async function buildUpdate(env, day, previous){
 
   const tsReady = ts.map(a=>({...a, content:a.description}));
 
-  const zdfEnriched = await Promise.all(zdf.map(item => articleExtract(item)));
-
+  const zdfEnriched = await Promise.all(
+  zdf.slice(0, 6).map(item => articleExtract(item))
+);
   const raw = unique([...tsReady, ...zdfEnriched]);
   if (!raw.length) return {noNews:true, message: previous ? 'No New News yet' : 'No News', failures};
 
