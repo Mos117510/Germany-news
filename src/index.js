@@ -204,17 +204,23 @@ async function buildUpdate(env, day, previous){
     (previous?.articles||[]).map(x=>x.link)
   );
 
-  const ai=await env.AI.run(
-    '@cf/google/gemma-4-26b-a4b-it',
-    {
-      messages:[
-        {
-          role:'user',
-          content:promptFor(raw,day)
-        }
-      ]
-    }
-  );
+const ai = {
+  response: JSON.stringify({
+    overview: 'TEST: Die KI wurde für diesen Geschwindigkeitstest übersprungen.',
+    sections: [
+      {
+        name: 'Test',
+        items: [
+          {
+            title: 'Geschwindigkeitstest',
+            text: 'Dieser Eintrag dient nur dazu zu prüfen, wie schnell der Worker ohne KI-Aufruf arbeitet.',
+            urls: raw.slice(0, 1).map(a => a.link)
+          }
+        ]
+      }
+    ]
+  })
+};
 
   const aiTime = performance.now() - aiStart;
 
