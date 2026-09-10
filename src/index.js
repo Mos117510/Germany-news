@@ -188,7 +188,11 @@ async function buildUpdate(env, day, previous){
   ]);
 
   const sourcesTime = performance.now() - sourcesStart;
-
+console.log('DEBUG Quellen:', {
+  tagesschau: ts.length,
+  zdf: zdf.length,
+  failures
+});
   if(sourceResults[0].status==='fulfilled') {
     ts=sourceResults[0].value;
   } else {
@@ -235,7 +239,12 @@ async function buildUpdate(env, day, previous){
   raw: raw.length,
   failures
 });
-
+console.log('DEBUG Raw:', {
+  raw: raw.length,
+  tagesschau: ts.length,
+  zdf: zdf.length,
+  zdfEnriched: zdfEnriched.length
+});
   if (!raw.length) {
     return {
       noNews:true,
