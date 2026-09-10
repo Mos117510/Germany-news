@@ -75,7 +75,41 @@ async function rssItems() {
   return items.slice(0,MAX_TAGESSCHAU_ITEMS);
 }
 
+async function // Sentinel used to abort HTMLRewriter early once we already have enough links -
+// this is what actually saves CPU, unlike slicing the array after a full parse.
+class EnoughLinks extends Error {}
+
 async function zdfLinks() {
+  const r=await safeFetch(ZDF_HOME,MAX_HOME_BYTES);
+  if(!r.ok) throw new Error('zdfheute.de nicht erreichbar');
+  const html=await readTextLimited(r,MAX_HOME_BYTES);
+  const out=[]; let current=null; const seen=new Set();
+  // Collect a small buffer beyond what we need (duplicates/short titles get filtered),
+  // then abort the parse immediately - we do NOT keep parsing the rest of the homepage.
+  const WANT = MAX_ZDF_ENRICHED * 3;
+  const rewriter=new HTMLRewriter()
+    .on('a',{element(e){
+      const href=e.getAttribute('href');
+      const url=href?absUrl(ZDF_HOME,href):null;
+      current=url?{url,text:''}:null;
+    },text(t){ if(current) current.text+=t.text; },end(){
+      if(current){
+        const title=clean(current.text);
+        if(title.length>=8 && !seen.has(current.url)){
+          seen.add(current.url);
+          out.push({source:'zdfheute.de',title,link:current.url,description:'',published:''});
+          if(out.length>=WANT){ current=null; throw new EnoughLinks(); }
+        }
+      }
+      current=null;
+    }});
+  try{
+    await rewriter.transform(new Response(html)).arrayBuffer();
+  }catch(e){
+    if(!(e instanceof EnoughLinks)) throw e;
+  }
+  return out.slice(0,MAX_ZDF_ENRICHED);
+} {
   const r=await safeFetch(ZDF_HOME,MAX_HOME_BYTES);
   if(!r.ok) throw new Error('zdfheute.de nicht erreichbar');
   const html=await readTextLimited(r,MAX_HOME_BYTES);
@@ -97,7 +131,37 @@ async function zdfLinks() {
   return out.filter(x=>{if(seen.has(x.link)) return false; seen.add(x.link); return true;}).slice(0,MAX_ZDF_ENRICHED);
 }
 
+async function // Same early-abort trick as zdfLinks(): stop parsing the article page the moment
+// we already have enough paragraphs, instead of parsing the whole page and slicing after.
+class EnoughParas extends Error {}
+
 async function articleExtract(item) {
+  try {
+    if(!allowedUrl(item.link)) return item;
+    const r=await safeFetch(item.link,MAX_ARTICLE_BYTES);
+    if(!r.ok) return item;
+    const html=await readTextLimited(r,MAX_ARTICLE_BYTES);
+    let desc=''; const paras=[]; let inP=false, p='';
+    const rw=new HTMLRewriter()
+      .on('meta',{element(e){ if((e.getAttribute('name')||'').toLowerCase()==='description') desc=e.getAttribute('content')||''; }})
+      .on('p',{element(){inP=true;p='';},text(t){if(inP)p+=t.text;},end(){
+        if(inP){
+          const x=clean(p);
+          if(x.length>=60){
+            paras.push(x);
+            if(paras.length>=6){ inP=false; throw new EnoughParas(); }
+          }
+        }
+        inP=false;
+      }});
+    try{
+      await rw.transform(new Response(html)).arrayBuffer();
+    }catch(e){
+      if(!(e instanceof EnoughParas)) throw e;
+    }
+    return {...item,description:clean(desc)||item.description,content:paras.slice(0,6).join(' ')};
+  } catch { return item; }
+} {
   try {
     if(!allowedUrl(item.link)) return item;
     const r=await safeFetch(item.link,MAX_ARTICLE_BYTES);
