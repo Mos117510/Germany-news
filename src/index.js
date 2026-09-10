@@ -228,6 +228,13 @@ async function buildUpdate(env, day, previous){
   const zdfTime = performance.now() - zdfStart;
 
   const raw = unique([...tsReady, ...zdfEnriched]);
+  console.log('News Debug:', {
+  tagesschau: ts.length,
+  zdf: zdf.length,
+  zdfEnriched: zdfEnriched.length,
+  raw: raw.length,
+  failures
+});
 
   if (!raw.length) {
     return {
