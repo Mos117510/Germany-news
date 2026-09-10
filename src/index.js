@@ -178,9 +178,7 @@ async function buildUpdate(env, day, previous){
     content:a.description
   }));
 
-  const zdfEnriched = await Promise.all(
-    zdf.slice(0, 6).map(item => articleExtract(item))
-  );
+  const zdfEnriched = [];
 
   const zdfTime = performance.now() - zdfStart;
 
