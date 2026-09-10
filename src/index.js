@@ -290,12 +290,31 @@ function withSecurity(response){
 }
 
 export default {
- async fetch(request,env){
-   try {
-     const r=await api(request,env); if(r) return withSecurity(r);
-     return withSecurity(await env.ASSETS.fetch(request));
-   } catch(e) {
-     return withSecurity(Response.json({error:'Interner Fehler. Bitte später erneut versuchen.'},{status:500}));
-   }
- }
+  async fetch(request, env) {
+    try {
+      const r = await api(request, env);
+
+      if (r) {
+        return withSecurity(r);
+      }
+
+      return withSecurity(
+        await env.ASSETS.fetch(request)
+      );
+    } catch(e) {
+      console.error("REFRESH ERROR:", e);
+
+      return withSecurity(
+        Response.json(
+          {
+            error: "Interner Fehler.",
+            detail: String(e?.message || e)
+          },
+          {
+            status: 500
+          }
+        )
+      );
+    }
+  }
 };
