@@ -60,24 +60,71 @@ async function safeFetch(url, maxBytes) {
 }
 
 async function rssItems() {
-  const r = await safeFetch(ZDF_HOME, MAX_HOME_BYTES);
+  const r = await safeFetch(
+    TAGESSCHAU_FEED,
+    MAX_FEED_BYTES
+  );
 
-console.log('ZDF Status:', r.status, r.statusText);
+  console.log(
+    'Tagesschau Status:',
+    r.status,
+    r.statusText
+  );
 
-if(!r.ok) {
-  throw new Error(`zdfheute.de nicht erreichbar: HTTP ${r.status}`);
-}
-  const xml=await readTextLimited(r,MAX_FEED_BYTES);
-  const items=[];
-  for(const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
-    const b=m[1];
-    const title=clean((b.match(/<title>([\s\S]*?)<\/title>/i)||[])[1]||'').replace(/<!\[CDATA\[|\]\]>/g,'');
-    const link=clean((b.match(/<link>([\s\S]*?)<\/link>/i)||[])[1]||'').replace(/<!\[CDATA\[|\]\]>/g,'');
-    const desc=clean((b.match(/<description>([\s\S]*?)<\/description>/i)||[])[1]||'').replace(/<[^>]+>/g,'').replace(/<!\[CDATA\[|\]\]>/g,'');
-    const pub=clean((b.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)||[])[1]||'');
-    if(title && allowedUrl(link)) items.push({source:'tagesschau.de',title,link,description:desc,published:pub});
+  if(!r.ok){
+    throw new Error(
+      `tagesschau.de nicht erreichbar: HTTP ${r.status}`
+    );
   }
-  return items.slice(0,MAX_TAGESSCHAU_ITEMS);
+
+  const xml = await readTextLimited(
+    r,
+    MAX_FEED_BYTES
+  );
+
+  const out = [];
+
+  const re = /<item\b[\s\S]*?<\/item>/gi;
+  const items = xml.match(re) || [];
+
+  for(const item of items){
+    const title =
+      clean(
+        (item.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '')
+      );
+
+    const link =
+      clean(
+        (item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] || '')
+      );
+
+    const description =
+      clean(
+        (item.match(/<description[^>]*>([\s\S]*?)<\/description>/i)?.[1] || '')
+      );
+
+    const published =
+      clean(
+        (item.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)?.[1] || '')
+      );
+
+    const url = absUrl(TAGESSCHAU_FEED, link);
+
+    if(title && url){
+      out.push({
+        source: 'tagesschau.de',
+        title,
+        link: url,
+        description,
+        published
+      });
+    }
+  }
+
+  return unique(out).slice(
+    0,
+    MAX_TAGESSCHAU_ITEMS
+  );
 }
 
 async function zdfLinks() {
@@ -177,9 +224,10 @@ function promptFor(articles, day){
 async function buildUpdate(env, day, previous){
   const totalStart = performance.now();
 
-  let ts=[], zdf=[]; const failures=[];
+  let ts = [], zdf = [];
+  const failures = [];
 
-  // 1. Tagesschau + ZDF-Startseite
+  // 1. Tagesschau + ZDF-Startseite gleichzeitig laden
   const sourcesStart = performance.now();
 
   const sourceResults = await Promise.allSettled([
@@ -188,34 +236,177 @@ async function buildUpdate(env, day, previous){
   ]);
 
   const sourcesTime = performance.now() - sourcesStart;
-console.log('DEBUG Quellen:', {
-  tagesschau: ts.length,
-  zdf: zdf.length,
-  failures
-});
-  if(sourceResults[0].status==='fulfilled') {
-    ts=sourceResults[0].value;
+
+  if(sourceResults[0].status === 'fulfilled'){
+    ts = sourceResults[0].value;
   } else {
     failures.push('tagesschau.de');
+    console.log('Tagesschau Fehler:', sourceResults[0].reason?.message || sourceResults[0].reason);
   }
 
-  if(sourceResults[1].status==='fulfilled') {
-    zdf=sourceResults[1].value;
+  if(sourceResults[1].status === 'fulfilled'){
+    zdf = sourceResults[1].value;
   } else {
     failures.push('zdfheute.de');
+    console.log('ZDF Fehler:', sourceResults[1].reason?.message || sourceResults[1].reason);
   }
 
-  if (failures.length === 2) {
+  console.log('DEBUG Quellen:', {
+    tagesschau: ts.length,
+    zdf: zdf.length,
+    failures
+  });
+
+  if(failures.length === 2){
     return {
-      noNews:true,
+      noNews: true,
       message: previous ? 'No New News yet' : 'No News',
       failures,
-      timing:{
+      timing: {
         sources: Math.round(sourcesTime),
         total: Math.round(performance.now() - totalStart)
       }
     };
   }
+
+  // 2. ZDF-Artikel laden
+  const zdfStart = performance.now();
+
+  const tsReady = ts.map(a => ({
+    ...a,
+    content: a.description
+  }));
+
+  const zdfEnriched = await Promise.all(
+    zdf.slice(0, MAX_ZDF_ENRICHED).map(item => articleExtract(item))
+  );
+
+  const zdfTime = performance.now() - zdfStart;
+
+  const raw = unique([
+    ...tsReady,
+    ...zdfEnriched
+  ]);
+
+  console.log('News Debug:', {
+    tagesschau: ts.length,
+    zdf: zdf.length,
+    zdfEnriched: zdfEnriched.length,
+    raw: raw.length,
+    failures
+  });
+
+  console.log('DEBUG Raw:', {
+    raw: raw.length,
+    tagesschau: ts.length,
+    zdf: zdf.length,
+    zdfEnriched: zdfEnriched.length
+  });
+
+  if(!raw.length){
+    return {
+      noNews: true,
+      message: previous ? 'No New News yet' : 'No News',
+      failures,
+      timing: {
+        sources: Math.round(sourcesTime),
+        zdfArticles: Math.round(zdfTime),
+        total: Math.round(performance.now() - totalStart)
+      }
+    };
+  }
+
+  // 3. KI
+  const aiStart = performance.now();
+
+  const ai = await env.AI.run(
+    '@cf/google/gemma-4-26b-a4b-it',
+    {
+      messages: [
+        {
+          role: 'user',
+          content: promptFor(raw, day)
+        }
+      ]
+    }
+  );
+
+  const aiTime = performance.now() - aiStart;
+
+  // 4. KI-Antwort verarbeiten
+  const parseStart = performance.now();
+
+  let text = ai?.response || '';
+
+  text = text
+    .replace(/^```json\s*|\s*```$/g, '')
+    .trim();
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      'Die KI-Antwort war kein gültiges JSON. Bitte erneut aktualisieren.'
+    );
+  }
+
+  const allArticles = raw.map(a => ({
+    source: a.source,
+    title: a.title,
+    link: a.link
+  }));
+
+  const allowedLinks = new Set(
+    allArticles.map(a => a.link)
+  );
+
+  data = cleanAiData(data, allowedLinks);
+
+  // Alte Artikel erkennen
+  const oldLinks = new Set(
+    (previous?.articles || []).map(x => x.link)
+  );
+
+  const marked = data.sections.map(section => ({
+    ...section,
+    items: section.items.map(item => ({
+      ...item,
+      new: item.urls.some(url => !oldLinks.has(url))
+    }))
+  }));
+
+  const parseTime = performance.now() - parseStart;
+  const totalTime = performance.now() - totalStart;
+
+  // Geschwindigkeit messen
+  console.log('Deutschland-News-Update Timing:', {
+    sources: Math.round(sourcesTime) + ' ms',
+    zdfArticles: Math.round(zdfTime) + ' ms',
+    ai: Math.round(aiTime) + ' ms',
+    parse: Math.round(parseTime) + ' ms',
+    total: Math.round(totalTime) + ' ms',
+    tagesschauArticles: ts.length,
+    zdfArticlesFound: zdf.length,
+    totalArticles: raw.length
+  });
+
+  return {
+    overview: data.overview || '',
+    sections: marked,
+    articles: allArticles,
+    failures,
+
+    timing: {
+      sources: Math.round(sourcesTime),
+      zdfArticles: Math.round(zdfTime),
+      ai: Math.round(aiTime),
+      parse: Math.round(parseTime),
+      total: Math.round(totalTime)
+    }
+  };
+}
 
   // 2. ZDF-Artikel
   const zdfStart = performance.now();
