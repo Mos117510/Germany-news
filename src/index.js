@@ -250,32 +250,21 @@ async function buildUpdate(env, day, previous){
   }
 
   // 3. KI
-  const aiStart = performance.now();
+const aiStart = performance.now();
 
-  const oldLinks=new Set(
-    (previous?.articles||[]).map(x=>x.link)
-  );
-
-const ai = {
-  response: JSON.stringify({
-    overview: 'TEST: Die KI wurde für diesen Geschwindigkeitstest übersprungen.',
-    sections: [
+const ai = await env.AI.run(
+  '@cf/google/gemma-4-26b-a4b-it',
+  {
+    messages: [
       {
-        name: 'Test',
-        items: [
-          {
-            title: 'Geschwindigkeitstest',
-            text: 'Dieser Eintrag dient nur dazu zu prüfen, wie schnell der Worker ohne KI-Aufruf arbeitet.',
-            urls: raw.slice(0, 1).map(a => a.link)
-          }
-        ]
+        role: 'user',
+        content: promptFor(raw, day)
       }
     ]
-  })
-};
+  }
+);
 
-  const aiTime = performance.now() - aiStart;
-
+const aiTime = performance.now() - aiStart;
   // 4. KI-Antwort verarbeiten
   const parseStart = performance.now();
 
