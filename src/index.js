@@ -81,25 +81,63 @@ if(!r.ok) {
 }
 
 async function zdfLinks() {
-  const r=await safeFetch(ZDF_HOME,MAX_HOME_BYTES);
-  if(!r.ok) throw new Error('zdfheute.de nicht erreichbar');
-  const html=await readTextLimited(r,MAX_HOME_BYTES);
-  const out=[]; let current=null;
-  const rewriter=new HTMLRewriter()
-    .on('a',{element(e){
-      const href=e.getAttribute('href');
-      const url=href?absUrl(ZDF_HOME,href):null;
-      current=url?{url,text:''}:null;
-    },text(t){ if(current) current.text+=t.text; },end(){
-      if(current){
-        const title=clean(current.text);
-        if(title.length>=8) out.push({source:'zdfheute.de',title,link:current.url,description:'',published:''});
+  const r = await safeFetch(ZDF_HOME, MAX_HOME_BYTES);
+
+  console.log('ZDF Status:', r.status, r.statusText);
+
+  if (!r.ok) {
+    throw new Error(`zdfheute.de nicht erreichbar: HTTP ${r.status}`);
+  }
+
+  const html = await readTextLimited(r, MAX_HOME_BYTES);
+
+  const out = [];
+  let current = null;
+
+  const rewriter = new HTMLRewriter()
+    .on('a', {
+      element(e) {
+        const href = e.getAttribute('href');
+        const url = href ? absUrl(ZDF_HOME, href) : null;
+        current = url ? { url, text: '' } : null;
+      },
+
+      text(t) {
+        if (current) current.text += t.text;
+      },
+
+      end() {
+        if (current) {
+          const title = clean(current.text);
+
+          if (title.length >= 8) {
+            out.push({
+              source: 'zdfheute.de',
+              title,
+              link: current.url,
+              description: '',
+              published: ''
+            });
+          }
+        }
+
+        current = null;
       }
-      current=null;
-    }});
-  await rewriter.transform(new Response(html)).arrayBuffer();
-  const seen=new Set();
-  return out.filter(x=>{if(seen.has(x.link)) return false; seen.add(x.link); return true;}).slice(0,MAX_ZDF_ENRICHED);
+    });
+
+  await rewriter
+    .transform(new Response(html))
+    .arrayBuffer();
+
+  const seen = new Set();
+
+  return out
+    .filter(x => {
+      if (seen.has(x.link)) return false;
+      seen.add(x.link);
+      return true;
+    })
+    .slice(0, MAX_ZDF_ENRICHED);
 }
 
 async function articleExtract(item) {
