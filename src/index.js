@@ -60,8 +60,13 @@ async function safeFetch(url, maxBytes) {
 }
 
 async function rssItems() {
-  const r=await safeFetch(TAGESSCHAU_FEED,MAX_FEED_BYTES);
-  if(!r.ok) throw new Error('tagesschau.de nicht erreichbar');
+  const r = await safeFetch(ZDF_HOME, MAX_HOME_BYTES);
+
+console.log('ZDF Status:', r.status, r.statusText);
+
+if(!r.ok) {
+  throw new Error(`zdfheute.de nicht erreichbar: HTTP ${r.status}`);
+}
   const xml=await readTextLimited(r,MAX_FEED_BYTES);
   const items=[];
   for(const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
