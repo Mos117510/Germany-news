@@ -283,21 +283,38 @@ function cleanAiData(data, allowedLinks) {
 }
 
 // ---------- AI PROMPT ----------
-function promptFor(articles, day) {
-  return `Du erstellst das Deutschland-News-Update für ${day}. Verwende AUSSCHLIESSLICH die unten gelieferten Inhalte von tagesschau.de und zdfheute.de.
+function promptFor(raw, day) {
+  return `
+Gib NUR ein gültiges JSON zurück.
+KEINE Erklärungen.
+KEINE Einleitung.
+KEINE Codeblöcke.
+KEIN Text außerhalb des JSON.
 
-Kategorien: Innenpolitik, Außenpolitik/International, Wirtschaft, Gesellschaft, Sport.
+JSON-Struktur:
 
-Ausgabe als JSON:
-{"overview":"120-200 Wörter","sections":[{"name":"Innenpolitik","items":[{"title":"...","text":"1-2 Sätze","urls":["..."]}]}]}
-
-ARTIKEL:
-${articles.map((a, i) => `[${i + 1}] ${a.source}
-Titel: ${a.title}
-URL: ${a.link}
-Beschreibung: ${a.description}
-Inhalt: ${(a.content || '').slice(0, 2000)}`).join('\n\n')}`;
+{
+  "overview": "",
+  "sections": [
+    {
+      "name": "",
+      "items": [
+        {
+          "title": "",
+          "text": "",
+          "urls": []
+        }
+      ]
+    }
+  ]
 }
+
+Hier sind die Artikel für ${day}:
+
+${raw.map(a => `- ${a.title} (${a.link})`).join("\n")}
+`;
+}
+
 
 // ---------- BUILD DAILY UPDATE ----------
 async function buildUpdate(env, day, previous) {
