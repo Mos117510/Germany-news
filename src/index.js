@@ -998,3 +998,18 @@ function withSecurity(response) {
 }
 
 // ---------- WORKER EXPORT ----------
+export default {
+  async fetch(request, env) {
+    try {
+      const r = await api(request, env);
+      if (r) return withSecurity(r);
+
+      return withSecurity(await env.ASSETS.fetch(request));
+    } catch (e) {
+      return withSecurity(
+        json({ error: 'Interner Fehler. Bitte später erneut versuchen.' }, 500)
+      );
+    }
+  }
+};
+  
