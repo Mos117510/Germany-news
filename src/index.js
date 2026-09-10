@@ -284,6 +284,9 @@ function cleanAiData(data, allowedLinks) {
 
 // ---------- AI PROMPT ----------
 function promptFor(raw, day) {
+function promptFor(raw, day) {
+  const limited = raw.slice(0, 10); // Maximal 10 Artikel
+
   return `
 Gib NUR ein gültiges JSON zurück.
 KEINE Erklärungen.
@@ -311,10 +314,9 @@ JSON-Struktur:
 
 Hier sind die Artikel für ${day}:
 
-${raw.map(a => `- ${a.title} (${a.link})`).join("\n")}
+${limited.map(a => `- ${a.title} (${a.link})`).join("\n")}
 `;
 }
-
 
 // ---------- BUILD DAILY UPDATE ----------
 async function buildUpdate(env, day, previous) {
