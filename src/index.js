@@ -779,7 +779,7 @@ if (request.method === 'POST' && url.pathname === '/api/refresh') {
   }
 
   // TODAY
-  if (request.method === 'GET' && url.pathname === '/api/today') {
+  if ((request.method === 'POST' || request.method === 'GET') && url.pathname === '/api/refresh') {
     const r = await env.DB
       .prepare('SELECT * FROM daily_updates WHERE day=?')
       .bind(day)
