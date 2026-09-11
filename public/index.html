@@ -310,7 +310,7 @@ async function refreshCurrent(){
       if (language !== 'de') await translateCurrent();
       else renderPeriod(x, view);
 
-      $('#status'].textContent = u.periodSaved;
+      $('#status').textContent = u.periodSaved;
     }
   } catch (e) {
     $('#status').textContent = 'Error: ' + e.message;
