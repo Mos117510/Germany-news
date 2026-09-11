@@ -364,7 +364,9 @@ async function buildUpdate(env, day, previous) {
     max_tokens: 2048
   });
 
-  let text = (ai?.response || '').trim();
+  let text = typeof ai?.response === 'string'
+  ? ai.response.trim()
+  : JSON.stringify(ai?.response || '').trim();
 
   // KI liefert nichts
   if (!text) {
