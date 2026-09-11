@@ -140,14 +140,17 @@ async function rssItems() {
   const out = [];
   const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
 
-  for (const item of items) {
+    for (const item of items) {
     const title = clean(item.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '');
     const link = clean(item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] || '');
     const description = clean(item.match(/<description[^>]*>([\s\S]*?)<\/description>/i)?.[1] || '');
     const published = clean(item.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)?.[1] || '');
 
     const url = absUrl(TAGESSCHAU_FEED, link);
-    if (title && url) {
+    // Skip video-only entries and anything with too little description text to summarize
+    // meaningfully - these are what produced thin, uninformative summaries before.
+    const isVideo = url && (url.includes('/video/') || /tagesschau_(20_uhr|in_100_sekunden)/i.test(url));
+    if (title && url && !isVideo && description.length >= 40) {
       out.push({
         source: 'tagesschau.de',
         title,
@@ -156,8 +159,7 @@ async function rssItems() {
         published
       });
     }
-  }
-
+    }
   return unique(out).slice(0, MAX_TAGESSCHAU_ITEMS);
 }
 
