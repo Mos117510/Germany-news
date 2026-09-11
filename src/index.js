@@ -270,14 +270,18 @@ function cleanAiData(data, allowedLinks) {
     overview: clean(String(data?.overview || '')).slice(0, 6000),
     sections: safeSections.slice(0, 8).map(s => ({
       name: clean(String(s?.name || '')).slice(0, 80),
-      items: Array.isArray(s?.items)
-        ? s.items.slice(0, 20).map(it => ({
-            title: clean(String(it?.title || '')).slice(0, 240),
-            text: clean(String(it?.text || '')).slice(0, 1200),
-            urls: Array.isArray(it?.urls)
-              ? it.urls.filter(u => typeof u === 'string' && allowedLinks.has(u)).slice(0, 3)
-              : []
-          })).filter(it => it.title && it.text)
+            items: Array.isArray(s?.items)
+        ? s.items.slice(0, 20).map(it => {
+            const title = clean(String(it?.title || '')).slice(0, 240);
+            const rawText = clean(String(it?.text || '')).slice(0, 1200);
+            return {
+              title,
+              text: rawText || title, // AI sometimes leaves text empty - fall back to the title rather than dropping the item
+              urls: Array.isArray(it?.urls)
+                ? it.urls.filter(u => typeof u === 'string' && allowedLinks.has(u)).slice(0, 3)
+                : []
+            };
+          }).filter(it => it.title)
         : []
     })).filter(s => s.name && s.items.length)
   };
