@@ -168,6 +168,64 @@ async function spiegelItems() {
   return parseRssFeed(xml, SPIEGEL_FEED, 'spiegel.de').slice(0, MAX_SPIEGEL_ITEMS);
 }
 
+// ---------- ARTICLE EXTRACT (lightweight - only for the ~10-12 already-known article URLs) ----------
+const MAX_ARTICLE_BYTES = 300_000;
+class EnoughParas extends Error {}
+
+async function articleExtract(item) {
+  try {
+    if (!allowedUrl(item.link)) return { ...item, content: item.description };
+
+    const r = await safeFetch(item.link, MAX_ARTICLE_BYTES);
+    if (!r.ok) return { ...item, content: item.description };
+
+    const html = await readTextLimited(r, MAX_ARTICLE_BYTES);
+
+    let desc = '';
+    const paras = [];
+    let inP = false;
+    let p = '';
+
+    const rw = new HTMLRewriter()
+      .on('meta', {
+        element(e) {
+          if ((e.getAttribute('name') || '').toLowerCase() === 'description') {
+            desc = e.getAttribute('content') || '';
+          }
+        }
+      })
+      .on('p', {
+        element() { inP = true; p = ''; },
+        text(t) { if (inP) p += t.text; },
+        end() {
+          if (inP) {
+            const x = clean(p);
+            if (x.length >= 60) {
+              paras.push(x);
+              // Stop parsing the moment we have enough - this is what keeps this cheap
+              // even though we're now fetching real article pages again.
+              if (paras.length >= 6) { inP = false; throw new EnoughParas(); }
+            }
+          }
+          inP = false;
+        }
+      });
+
+    try {
+      await rw.transform(new Response(html)).arrayBuffer();
+    } catch (e) {
+      if (!(e instanceof EnoughParas)) throw e;
+    }
+
+    return {
+      ...item,
+      description: clean(desc) || item.description,
+      content: paras.length ? paras.slice(0, 6).join(' ') : item.description
+    };
+  } catch {
+    return { ...item, content: item.description };
+  }
+}
 // ---------- AI CLEANING ----------
 function cleanAiData(data, allowedLinks) {
   const safeSections = Array.isArray(data?.sections) ? data.sections : [];
@@ -194,7 +252,6 @@ function cleanAiData(data, allowedLinks) {
 }
 
 // ---------- AI PROMPT ----------
-// ---------- AI PROMPT ----------
 function promptFor(raw, day) {
   const limited = raw.slice(0, 10); // Maximal 10 Artikel
 
@@ -205,7 +262,11 @@ KEINE Einleitung.
 KEINE Codeblöcke.
 KEIN Text außerhalb des JSON.
 
-WICHTIG für das Feld "text": Schreibe für JEDEN Artikel einen eigenen, informativen Satz (mindestens 10-15 Wörter), der auf der unten gelieferten Beschreibung basiert und konkrete zusätzliche Details nennt. Wiederhole NIEMALS einfach den Titel als "text" - das ist ein Fehler. Fasse den tatsächlichen Inhalt zusammen.
+WICHTIG für "overview": Schreibe 2-3 zusammenhängende Sätze, die die wichtigsten Themen des Tages einordnen. Darf NIEMALS leer sein.
+
+WICHTIG für "text" pro Artikel: Schreibe eine ausführliche Zusammenfassung von 3-5 vollständigen Sätzen (keine kurze Andeutung), basierend auf dem gelieferten Inhalt. Nenne konkrete Fakten, Namen und Zusammenhänge aus dem Inhalt. Wiederhole NIEMALS einfach den Titel als "text".
+
+Fasse thematisch zusammengehörige Artikel in derselben Sektion zusammen - verwende einen Sektionsnamen nur EINMAL, nicht mehrfach für dasselbe Thema.
 
 JSON-Struktur:
 
@@ -229,10 +290,11 @@ Hier sind die Artikel für ${day}:
 
 ${limited.map(a => `- Titel: ${a.title}
   Quelle: ${a.source}
-  Beschreibung: ${a.description || a.content || '(keine Beschreibung verfügbar)'}
+  Inhalt: ${(a.content || a.description || '(kein Inhalt verfügbar)').slice(0, 2000)}
   URL: ${a.link}`).join("\n\n")}
 `;
 }
+
 // ---------- BUILD DAILY UPDATE ----------
 async function buildUpdate(env, day, previous) {
   const totalStart = Date.now();
@@ -259,9 +321,9 @@ async function buildUpdate(env, day, previous) {
     };
   }
 
-  const raw = unique([...ts, ...spiegel].map(a => ({ ...a, content: a.description })));
+  const rawBase = unique([...ts, ...spiegel]);
 
-  if (!raw.length) {
+  if (!rawBase.length) {
     return {
       noNews: true,
       message: previous ? 'No New News yet' : 'No News',
@@ -269,10 +331,14 @@ async function buildUpdate(env, day, previous) {
     };
   }
 
+  // Fetch each article's real page and pull out its actual paragraph text -
+  // only ~10-12 already-known URLs, so this stays cheap even on the Free plan.
+  const raw = await Promise.all(rawBase.map(a => articleExtract(a)));
+
   // ---------- AI ----------
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [{ role: 'user', content: promptFor(raw, day) }],
-    max_tokens: 2048
+    max_tokens: 3072
   });
 
   let text = typeof ai?.response === 'string'
@@ -696,50 +762,83 @@ function refreshAllowed(request) {
 async function api(request, env) {
   const url = new URL(request.url);
   const day = todayBerlin();
-// DAILY REFRESH
-  
+
   // DAILY REFRESH
-  if ((request.method === 'POST' || request.method === 'GET') && url.pathname === '/api/refresh')
- {
-  if (!refreshAllowed(request)) {
-    return json(
-      { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
-      429
-    );
+  if (
+    (request.method === 'POST' || request.method === 'GET') &&
+    url.pathname === '/api/refresh'
+  ) {
+    if (!refreshAllowed(request)) {
+      return json(
+        { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
+        429
+      );
+    }
+
+    const prev = await env.DB
+      .prepare('SELECT * FROM daily_updates WHERE day=?')
+      .bind(day)
+      .first();
+
+    const old = prev
+      ? { articles: JSON.parse(prev.articles_json) }
+      : null;
+
+    const data = await buildUpdate(env, day, old);
+
+    if (data.noNews) {
+      return json({ day, ...data });
+    }
+
+    const now = new Date().toISOString();
+
+    await env.DB
+      .prepare(
+        `INSERT INTO daily_updates(
+          day,
+          overview,
+          sections_json,
+          articles_json,
+          updated_at
+        )
+        VALUES(?,?,?,?,?)
+        ON CONFLICT(day)
+        DO UPDATE SET
+          overview=excluded.overview,
+          sections_json=excluded.sections_json,
+          articles_json=excluded.articles_json,
+          updated_at=excluded.updated_at`
+      )
+      .bind(
+        day,
+        data.overview,
+        JSON.stringify(data.sections),
+        JSON.stringify(data.articles),
+        now
+      )
+      .run();
+
+    return json({
+      day,
+      ...data,
+      updated_at: now
+    });
   }
 
-  const prev = await env.DB
-    .prepare('SELECT * FROM daily_updates WHERE day=?')
-    .bind(day)
-    .first();
-
-  const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
-
-  const data = await buildUpdate(env, day, old);
-
-  if (data.noNews) return json({ day, ...data });
-
-  const now = new Date().toISOString();
-
-  await env.DB
-    .prepare(
-      `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
-       VALUES(?,?,?,?,?)
-       ON CONFLICT(day)
-       DO UPDATE SET overview=excluded.overview,
-                     sections_json=excluded.sections_json,
-                     articles_json=excluded.articles_json,
-                     updated_at=excluded.updated_at`
-    )
-    .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
-    .run();
-
-  return json({ day, ...data, updated_at: now });
- }
   // HISTORY
   if (request.method === 'GET' && url.pathname === '/api/history') {
     const rows = await env.DB
-      .prepare('SELECT day,overview,sections_json,articles_json,updated_at FROM daily_updates ORDER BY day DESC LIMIT 60')
+      .prepare(
+        `SELECT
+          day,
+          overview,
+          sections_json,
+          articles_json,
+          updated_at
+         FROM daily_updates
+         ORDER BY day DESC
+         LIMIT 60`
+      )
       .all();
 
     return json(
@@ -752,32 +851,40 @@ async function api(request, env) {
   }
 
   // TODAY
-  // TODAY
-if (request.method === 'GET' && url.pathname === '/api/today') {
-  const r = await env.DB
-    .prepare('SELECT * FROM daily_updates WHERE day=?')
-    .bind(day)
-    .first();
+  if (request.method === 'GET' && url.pathname === '/api/today') {
+    const r = await env.DB
+      .prepare('SELECT * FROM daily_updates WHERE day=?')
+      .bind(day)
+      .first();
 
-  return json(
-    r
-      ? {
-          ...r,
-          sections: JSON.parse(r.sections_json),
-          articles: JSON.parse(r.articles_json)
-        }
-      : null
-  );
-}
-
+    return json(
+      r
+        ? {
+            ...r,
+            sections: JSON.parse(r.sections_json),
+            articles: JSON.parse(r.articles_json)
+          }
+        : null
+    );
+  }
 
   // WEEKLY / MONTHLY GET
-  if (request.method === 'GET' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
-    const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
+  if (
+    request.method === 'GET' &&
+    (url.pathname === '/api/weekly' ||
+      url.pathname === '/api/monthly')
+  ) {
+    const type =
+      url.pathname === '/api/weekly'
+        ? 'weekly'
+        : 'monthly';
+
     const key = periodKey(type, day);
 
     const r = await env.DB
-      .prepare('SELECT * FROM period_updates WHERE type=? AND period_key=?')
+      .prepare(
+        'SELECT * FROM period_updates WHERE type=? AND period_key=?'
+      )
       .bind(type, key)
       .first();
 
@@ -793,7 +900,11 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
   }
 
   // WEEKLY / MONTHLY REFRESH
-  if (request.method === 'POST' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
+  if (
+    request.method === 'POST' &&
+    (url.pathname === '/api/weekly' ||
+      url.pathname === '/api/monthly')
+  ) {
     if (!refreshAllowed(request)) {
       return json(
         { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
@@ -801,48 +912,83 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
       );
     }
 
-    const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
+    const type =
+      url.pathname === '/api/weekly'
+        ? 'weekly'
+        : 'monthly';
+
     const data = await buildPeriod(env, type, day);
 
-    if (data.noNews) return json(data);
+    if (data.noNews) {
+      return json(data);
+    }
 
     const now = new Date().toISOString();
 
     await env.DB
       .prepare(
-        `INSERT INTO period_updates(type,period_key,overview,sections_json,days_json,updated_at)
-         VALUES(?,?,?,?,?,?)
-         ON CONFLICT(type,period_key)
-         DO UPDATE SET overview=excluded.overview,
-                       sections_json=excluded.sections_json,
-                       days_json=excluded.days_json,
-                       updated_at=excluded.updated_at`
+        `INSERT INTO period_updates(
+          type,
+          period_key,
+          overview,
+          sections_json,
+          days_json,
+          updated_at
+        )
+        VALUES(?,?,?,?,?,?)
+        ON CONFLICT(type,period_key)
+        DO UPDATE SET
+          overview=excluded.overview,
+          sections_json=excluded.sections_json,
+          days_json=excluded.days_json,
+          updated_at=excluded.updated_at`
       )
-      .bind(type, data.key, data.overview, JSON.stringify(data.sections), JSON.stringify(data.days), now)
+      .bind(
+        type,
+        data.key,
+        data.overview,
+        JSON.stringify(data.sections),
+        JSON.stringify(data.days),
+        now
+      )
       .run();
 
-    return json({ ...data, updated_at: now });
+    return json({
+      ...data,
+      updated_at: now
+    });
   }
 
   // TRANSLATE
-  if (request.method === 'POST' && url.pathname === '/api/translate') {
-    const ipKey = request.headers.get('CF-Connecting-IP') || 'global';
+  if (
+    request.method === 'POST' &&
+    url.pathname === '/api/translate'
+  ) {
+    const ipKey =
+      request.headers.get('CF-Connecting-IP') || 'global';
+
     const now = Date.now();
     const last = translateTimes.get(ipKey) || 0;
 
     if (now - last < 3000) {
-      return json({ error: 'Bitte kurz warten.' }, 429);
+      return json(
+        { error: 'Bitte kurz warten.' },
+        429
+      );
     }
 
     translateTimes.set(ipKey, now);
 
     if (translateTimes.size > 5000) {
       for (const [k, v] of translateTimes) {
-        if (now - v > 300000) translateTimes.delete(k);
+        if (now - v > 300000) {
+          translateTimes.delete(k);
+        }
       }
     }
 
     let body = {};
+
     try {
       body = await request.json();
     } catch {}
@@ -851,49 +997,24 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
     const type = String(body.type || 'daily');
     const key = String(body.key || day);
 
-    if (!LANGS.has(language) || !['daily', 'weekly', 'monthly'].includes(type)) {
-      return json({ error: 'Ungültige Sprache oder Ansicht.' }, 400);
-    }
-
-    return json(await translateSaved(env, type, key, language));
-  }
-
-  // DAILY REFRESH
-  if (request.method === 'POST' && url.pathname === '/api/refresh') {
-    if (!refreshAllowed(request)) {
+    if (
+      !LANGS.has(language) ||
+      !['daily', 'weekly', 'monthly'].includes(type)
+    ) {
       return json(
-        { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
-        429
+        { error: 'Ungültige Sprache oder Ansicht.' },
+        400
       );
     }
 
-    const prev = await env.DB
-      .prepare('SELECT * FROM daily_updates WHERE day=?')
-      .bind(day)
-      .first();
-
-    const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
-
-    const data = await buildUpdate(env, day, old);
-
-    if (data.noNews) return json({ day, ...data });
-
-    const now = new Date().toISOString();
-
-    await env.DB
-      .prepare(
-        `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
-         VALUES(?,?,?,?,?)
-         ON CONFLICT(day)
-         DO UPDATE SET overview=excluded.overview,
-                       sections_json=excluded.sections_json,
-                       articles_json=excluded.articles_json,
-                       updated_at=excluded.updated_at`
+    return json(
+      await translateSaved(
+        env,
+        type,
+        key,
+        language
       )
-      .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
-      .run();
-
-    return json({ day, ...data, updated_at: now });
+    );
   }
 
   return null;
@@ -901,20 +1022,44 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
 
 // ---------- SECURITY HEADERS ----------
 function secureHeaders(headers = new Headers()) {
-  headers.set('X-Content-Type-Options', 'nosniff');
-  headers.set('X-Frame-Options', 'DENY');
-  headers.set('Referrer-Policy', 'no-referrer');
-  headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+  headers.set(
+    'X-Content-Type-Options',
+    'nosniff'
+  );
+
+  headers.set(
+    'X-Frame-Options',
+    'DENY'
+  );
+
+  headers.set(
+    'Referrer-Policy',
+    'no-referrer'
+  );
+
+  headers.set(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=()'
+  );
+
+  headers.set(
+    'Cross-Origin-Opener-Policy',
+    'same-origin'
+  );
+
   headers.set(
     'Content-Security-Policy',
     "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
   );
+
   return headers;
 }
 
 function withSecurity(response) {
-  const headers = secureHeaders(new Headers(response.headers));
+  const headers = secureHeaders(
+    new Headers(response.headers)
+  );
+
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -927,14 +1072,29 @@ export default {
   async fetch(request, env) {
     try {
       const r = await api(request, env);
-      if (r) return withSecurity(r);
 
-      return withSecurity(await env.ASSETS.fetch(request));
-    } catch (e) {
-      // TEMPORARY - shows us the real error so we can finally fix the actual cause.
-      // Remove the "debug" field once this is solved.
+      if (r) {
+        return withSecurity(r);
+      }
+
       return withSecurity(
-        json({ error: 'Interner Fehler. Bitte später erneut versuchen.', debug: String((e && e.stack) || e) }, 500)
+        await env.ASSETS.fetch(request)
+      );
+    } catch (e) {
+      // TEMPORARY DEBUG
+      // Remove the "debug" field once everything works.
+      return withSecurity(
+        json(
+          {
+            error:
+              'Interner Fehler. Bitte später erneut versuchen.',
+            debug:
+              String(
+                (e && e.stack) || e
+              )
+          },
+          500
+        )
       );
     }
   }
