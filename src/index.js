@@ -159,6 +159,7 @@ async function rssItems() {
         published
       });
     }
+    }
   return unique(out).slice(0, MAX_TAGESSCHAU_ITEMS);
 }
 
