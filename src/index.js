@@ -656,7 +656,6 @@ async function translateSaved(env, type, key, language) {
   messages: [{ role: 'user', content: translationPrompt(language, source) }],
   max_tokens: 4096,
   temperature: 0.2
-});
     });
 
     let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
