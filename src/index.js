@@ -149,7 +149,7 @@ async function rssItems() {
     const url = absUrl(TAGESSCHAU_FEED, link);
     // Skip video-only entries and anything with too little description text to summarize
     // meaningfully - these are what produced thin, uninformative summaries before.
-    const isVideo = url && (url.includes('/video/') || /tagesschau_(20_uhr|in_100_sekunden)/i.test(url));
+        const isVideo = url && /\/video[-/]/i.test(url);
     if (title && url && !isVideo && description.length >= 40) {
       out.push({
         source: 'tagesschau.de',
