@@ -382,7 +382,7 @@ async function buildUpdate(env, day, previous) {
   // Codeblock entfernen
   text = text.replace(/^```json\s*|\s*```$/g, '').trim();
 
-  let data;
+    let data;
   try {
     data = JSON.parse(text);
   } catch (err) {
@@ -393,16 +393,7 @@ async function buildUpdate(env, day, previous) {
       rawAiResponse: text
     };
   }
-    // TEMPORARY DEBUG - see the AI's raw structure before cleanAiData filters it down
-  if (!Array.isArray(data?.sections) || data.sections.length === 0) {
-    return {
-      noNews: true,
-      message: 'KI-Antwort hatte keine verwertbaren sections.',
-      failures,
-      rawParsedBeforeClean: JSON.stringify(data).slice(0, 3000)
-    };
-  }
-  // ---------- CLEAN ----------
+
   const allArticles = raw.map(a => ({
     source: a.source,
     title: a.title,
@@ -411,8 +402,18 @@ async function buildUpdate(env, day, previous) {
 
   const allowedLinks = new Set(allArticles.map(a => a.link));
 
+  const rawParsed = data;
   data = cleanAiData(data, allowedLinks);
 
+  // TEMPORARY DEBUG - cleaning wiped out every section; show what the AI actually sent
+  if (!data.sections.length) {
+    return {
+      noNews: true,
+      message: 'cleanAiData hat alle sections entfernt.',
+      failures,
+      rawParsedBeforeClean: JSON.stringify(rawParsed).slice(0, 3000)
+    };
+  }
   const oldLinks = new Set((previous?.articles || []).map(x => x.link));
 
   const marked = data.sections.map(section => ({
