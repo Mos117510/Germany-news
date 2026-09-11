@@ -1,7 +1,6 @@
 // ======================================================
 // TEIL 1 — Utilities, Scraper, Tagesupdate (FREE PLAN)
 // ======================================================
-
 // ---------- CONSTANTS ----------
 const TAGESSCHAU_FEED = 'https://www.tagesschau.de/index~rss2.xml';
 const ZDF_HOME = 'https://www.zdfheute.de/';
