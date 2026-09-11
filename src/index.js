@@ -796,44 +796,7 @@ async function api(request, env) {
 // DAILY REFRESH
   
   // DAILY REFRESH
-  if ((request.method === 'POST' || request.method === 'GET') && url.pathname === '/api/refresh')
- {
-  if (!refreshAllowed(request)) {
-    return json(
-      { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
-      429
-    );
-  }
-
-  const prev = await env.DB
-    .prepare('SELECT * FROM daily_updates WHERE day=?')
-    .bind(day)
-    .first();
-
-  const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
-
-  const data = await buildUpdate(env, day, old);
-
-  if (data.noNews) return json({ day, ...data });
-
-  const now = new Date().toISOString();
-
-  await env.DB
-    .prepare(
-      `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
-       VALUES(?,?,?,?,?)
-       ON CONFLICT(day)
-              DO UPDATE SET overview=excluded.overview,
-                     sections_json=excluded.sections_json,
-                     articles_json=excluded.articles_json,
-                     updated_at=excluded.updated_at,
-                     translations_json='{}'`
-    )
-    .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
-    .run();
-
-  return json({ day, ...data, updated_at: now });
- }
+  
   // HISTORY
   if (request.method === 'GET' && url.pathname === '/api/history') {
     const rows = await env.DB
