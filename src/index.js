@@ -362,6 +362,7 @@ async function buildUpdate(env, day, previous) {
   // ---------- AI ----------
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [{ role: 'user', content: promptFor(raw, day) }]
+    max_tokens: 2048
   });
 
   let text = (ai?.response || '').trim();
@@ -525,13 +526,14 @@ async function buildPeriod(env, type, day) {
   const key = periodKey(type, day);
 
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
-    messages: [
-      {
-        role: 'user',
-        content: periodPrompt(type, key, rows.results)
-      }
-    ]
-  });
+  messages: [
+    {
+      role: 'user',
+      content: periodPrompt(type, key, rows.results)
+    }
+  ],
+  max_tokens: 4096
+});
 
   let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
 
@@ -652,7 +654,10 @@ async function translateSaved(env, type, key, language) {
     const allowedLinks = new Set(JSON.parse(row.articles_json).map(a => a.link));
 
     const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
-      messages: [{ role: 'user', content: translationPrompt(language, source) }]
+  messages: [{ role: 'user', content: translationPrompt(language, source) }],
+  max_tokens: 4096,
+  temperature: 0.2
+});
     });
 
     let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
@@ -715,8 +720,10 @@ async function translateSaved(env, type, key, language) {
   const allowedLinks = new Set(); // Perioden haben keine URLs
 
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
-    messages: [{ role: 'user', content: translationPrompt(language, source) }]
-  });
+  messages: [{ role: 'user', content: translationPrompt(language, source) }],
+  max_tokens: 4096,
+  temperature: 0.2
+});
 
   let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
 
