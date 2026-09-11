@@ -360,7 +360,7 @@ async function buildUpdate(env, day, previous) {
 
   // ---------- AI ----------
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
-    messages: [{ role: 'user', content: promptFor(raw, day) }]
+    messages: [{ role: 'user', content: promptFor(raw, day) }],
     max_tokens: 2048
   });
 
