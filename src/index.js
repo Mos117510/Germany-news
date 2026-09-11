@@ -391,7 +391,15 @@ async function buildUpdate(env, day, previous) {
       rawAiResponse: text
     };
   }
-
+    // TEMPORARY DEBUG - see the AI's raw structure before cleanAiData filters it down
+  if (!Array.isArray(data?.sections) || data.sections.length === 0) {
+    return {
+      noNews: true,
+      message: 'KI-Antwort hatte keine verwertbaren sections.',
+      failures,
+      rawParsedBeforeClean: JSON.stringify(data).slice(0, 3000)
+    };
+  }
   // ---------- CLEAN ----------
   const allArticles = raw.map(a => ({
     source: a.source,
