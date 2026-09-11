@@ -360,7 +360,7 @@ async function buildUpdate(env, day, previous) {
   }
 
   // ---------- AI ----------
-  const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+  const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [{ role: 'user', content: promptFor(raw, day) }]
   });
 
@@ -524,7 +524,7 @@ async function buildPeriod(env, type, day) {
 
   const key = periodKey(type, day);
 
-  const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+  const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [
       {
         role: 'user',
@@ -651,7 +651,7 @@ async function translateSaved(env, type, key, language) {
 
     const allowedLinks = new Set(JSON.parse(row.articles_json).map(a => a.link));
 
-    const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+    const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
       messages: [{ role: 'user', content: translationPrompt(language, source) }]
     });
 
@@ -714,7 +714,7 @@ async function translateSaved(env, type, key, language) {
 
   const allowedLinks = new Set(); // Perioden haben keine URLs
 
-  const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+  const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [{ role: 'user', content: translationPrompt(language, source) }]
   });
 
