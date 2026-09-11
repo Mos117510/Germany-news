@@ -194,6 +194,7 @@ function cleanAiData(data, allowedLinks) {
 }
 
 // ---------- AI PROMPT ----------
+// ---------- AI PROMPT ----------
 function promptFor(raw, day) {
   const limited = raw.slice(0, 10); // Maximal 10 Artikel
 
@@ -203,6 +204,8 @@ KEINE Erklärungen.
 KEINE Einleitung.
 KEINE Codeblöcke.
 KEIN Text außerhalb des JSON.
+
+WICHTIG für das Feld "text": Schreibe für JEDEN Artikel einen eigenen, informativen Satz (mindestens 10-15 Wörter), der auf der unten gelieferten Beschreibung basiert und konkrete zusätzliche Details nennt. Wiederhole NIEMALS einfach den Titel als "text" - das ist ein Fehler. Fasse den tatsächlichen Inhalt zusammen.
 
 JSON-Struktur:
 
@@ -224,10 +227,12 @@ JSON-Struktur:
 
 Hier sind die Artikel für ${day}:
 
-${limited.map(a => `- ${a.title} (${a.link})`).join("\n")}
+${limited.map(a => `- Titel: ${a.title}
+  Quelle: ${a.source}
+  Beschreibung: ${a.description || a.content || '(keine Beschreibung verfügbar)'}
+  URL: ${a.link}`).join("\n\n")}
 `;
 }
-
 // ---------- BUILD DAILY UPDATE ----------
 async function buildUpdate(env, day, previous) {
   const totalStart = Date.now();
