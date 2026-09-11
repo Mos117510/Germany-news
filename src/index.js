@@ -3,15 +3,13 @@
 // ======================================================
 // ---------- CONSTANTS ----------
 const TAGESSCHAU_FEED = 'https://www.tagesschau.de/index~rss2.xml';
-const ZDF_HOME = 'https://www.zdfheute.de/';
-const ALLOWED = ['tagesschau.de', 'zdfheute.de', 'zdf.de'];
+const SPIEGEL_FEED = 'https://www.spiegel.de/index.rss';
+const ALLOWED = ['tagesschau.de', 'spiegel.de'];
 
 const UA = 'Deutschland-News-Update/1.0';
-const MAX_FEED_BYTES = 600_000;       // reduziert für FREE
-const MAX_HOME_BYTES = 250_000;       // reduziert für FREE
-const MAX_ARTICLE_BYTES = 200_000;    // reduziert für FREE
-const MAX_ZDF_ENRICHED = 5;           // reduziert für FREE
-const MAX_TAGESSCHAU_ITEMS = 5;       // reduziert für FREE
+const MAX_FEED_BYTES = 600_000;
+const MAX_TAGESSCHAU_ITEMS = 6;
+const MAX_SPIEGEL_ITEMS = 6;
 
 // ---------- HELPERS ----------
 function todayBerlin() {
@@ -130,136 +128,44 @@ async function safeFetch(url, maxBytes) {
   throw new Error('Zu viele Redirects');
 }
 
+// ---------- SHARED RSS PARSER (works for any well-formed RSS 2.0 feed) ----------
+function parseRssFeed(xml, feedUrl, sourceName) {
+  const out = [];
+  const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
+
+  for (const item of items) {
+    const stripCdata = s => clean(s.replace(/<!\[CDATA\[|\]\]>/g, ''));
+    const title = stripCdata(item.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '');
+    const link = stripCdata(item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] || '');
+    const description = stripCdata(item.match(/<description[^>]*>([\s\S]*?)<\/description>/i)?.[1] || '');
+    const published = stripCdata(item.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)?.[1] || '');
+
+    const url = absUrl(feedUrl, link);
+    // Skip video-only entries and anything with too little description text to summarize
+    // meaningfully - these are what produced thin, uninformative summaries before.
+    const isVideo = url && /\/video[-/]/i.test(url);
+    if (title && url && !isVideo && description.length >= 40) {
+      out.push({ source: sourceName, title, link: url, description, published });
+    }
+  }
+
+  return unique(out);
+}
+
 // ---------- SCRAPER: TAGESSCHAU ----------
 async function rssItems() {
   const r = await safeFetch(TAGESSCHAU_FEED, MAX_FEED_BYTES);
   if (!r.ok) throw new Error(`tagesschau.de nicht erreichbar: HTTP ${r.status}`);
-
   const xml = await readTextLimited(r, MAX_FEED_BYTES);
-
-  const out = [];
-  const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
-
-    for (const item of items) {
-    const title = clean(item.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '');
-    const link = clean(item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] || '');
-    const description = clean(item.match(/<description[^>]*>([\s\S]*?)<\/description>/i)?.[1] || '');
-    const published = clean(item.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)?.[1] || '');
-
-    const url = absUrl(TAGESSCHAU_FEED, link);
-    // Skip video-only entries and anything with too little description text to summarize
-    // meaningfully - these are what produced thin, uninformative summaries before.
-        const isVideo = url && /\/video[-/]/i.test(url);
-    if (title && url && !isVideo && description.length >= 40) {
-      out.push({
-        source: 'tagesschau.de',
-        title,
-        link: url,
-        description,
-        published
-      });
-    }
-    }
-  return unique(out).slice(0, MAX_TAGESSCHAU_ITEMS);
+  return parseRssFeed(xml, TAGESSCHAU_FEED, 'tagesschau.de').slice(0, MAX_TAGESSCHAU_ITEMS);
 }
 
-// ---------- SCRAPER: ZDF ----------
-async function zdfLinks() {
-  const r = await safeFetch(ZDF_HOME, MAX_HOME_BYTES);
-  if (!r.ok) throw new Error(`zdfheute.de nicht erreichbar: HTTP ${r.status}`);
-
-  const html = await readTextLimited(r, MAX_HOME_BYTES);
-
-  const out = [];
-  let current = null;
-
-  const rw = new HTMLRewriter()
-    .on('a', {
-      element(e) {
-        const href = e.getAttribute('href');
-        const url = href ? absUrl(ZDF_HOME, href) : null;
-        current = url ? { url, text: '' } : null;
-      },
-      text(t) {
-        if (current) current.text += t.text;
-      },
-      end() {
-        if (current) {
-          const title = clean(current.text);
-          if (title.length >= 8) {
-            out.push({
-              source: 'zdfheute.de',
-              title,
-              link: current.url,
-              description: '',
-              published: ''
-            });
-          }
-        }
-        current = null;
-      }
-    });
-
-  await rw.transform(new Response(html)).arrayBuffer();
-
-  const seen = new Set();
-  return out.filter(x => {
-    if (seen.has(x.link)) return false;
-    seen.add(x.link);
-    return true;
-  }).slice(0, MAX_ZDF_ENRICHED);
-}
-
-// ---------- ARTICLE EXTRACT ----------
-async function articleExtract(item) {
-  try {
-    if (!allowedUrl(item.link)) return item;
-
-    const r = await safeFetch(item.link, MAX_ARTICLE_BYTES);
-    if (!r.ok) return item;
-
-    const html = await readTextLimited(r, MAX_ARTICLE_BYTES);
-
-    let desc = '';
-    const paras = [];
-    let inP = false;
-    let p = '';
-
-    const rw = new HTMLRewriter()
-      .on('meta', {
-        element(e) {
-          if ((e.getAttribute('name') || '').toLowerCase() === 'description') {
-            desc = e.getAttribute('content') || '';
-          }
-        }
-      })
-      .on('p', {
-        element() {
-          inP = true;
-          p = '';
-        },
-        text(t) {
-          if (inP) p += t.text;
-        },
-        end() {
-          if (inP) {
-            const x = clean(p);
-            if (x.length >= 60) paras.push(x);
-          }
-          inP = false;
-        }
-      });
-
-    await rw.transform(new Response(html)).arrayBuffer();
-
-    return {
-      ...item,
-      description: clean(desc) || item.description,
-      content: paras.slice(0, 5).join(' ')
-    };
-  } catch {
-    return item;
-  }
+// ---------- SCRAPER: SPIEGEL ----------
+async function spiegelItems() {
+  const r = await safeFetch(SPIEGEL_FEED, MAX_FEED_BYTES);
+  if (!r.ok) throw new Error(`spiegel.de nicht erreichbar: HTTP ${r.status}`);
+  const xml = await readTextLimited(r, MAX_FEED_BYTES);
+  return parseRssFeed(xml, SPIEGEL_FEED, 'spiegel.de').slice(0, MAX_SPIEGEL_ITEMS);
 }
 
 // ---------- AI CLEANING ----------
@@ -327,17 +233,17 @@ async function buildUpdate(env, day, previous) {
   const totalStart = Date.now();
 
   let ts = [];
-  let zdf = [];
+  let spiegel = [];
   const failures = [];
 
   // Load sources
-  const sourceResults = await Promise.allSettled([rssItems(), zdfLinks()]);
+  const sourceResults = await Promise.allSettled([rssItems(), spiegelItems()]);
 
   if (sourceResults[0].status === 'fulfilled') ts = sourceResults[0].value;
   else failures.push('tagesschau.de');
 
-  if (sourceResults[1].status === 'fulfilled') zdf = sourceResults[1].value;
-  else failures.push('zdfheute.de');
+  if (sourceResults[1].status === 'fulfilled') spiegel = sourceResults[1].value;
+  else failures.push('spiegel.de');
 
   // If both failed → no news
   if (failures.length === 2) {
@@ -348,13 +254,7 @@ async function buildUpdate(env, day, previous) {
     };
   }
 
-  // Enrich ZDF
-  const tsReady = ts.map(a => ({ ...a, content: a.description }));
-  const zdfEnriched = await Promise.all(
-    zdf.slice(0, MAX_ZDF_ENRICHED).map(item => articleExtract(item))
-  );
-
-  const raw = unique([...tsReady, ...zdfEnriched]);
+  const raw = unique([...ts, ...spiegel].map(a => ({ ...a, content: a.description })));
 
   if (!raw.length) {
     return {
@@ -525,7 +425,6 @@ function cleanPeriodData(data, type) {
     })).filter(s => s.name && s.items.length)
   };
 }
-
 // ---------- BUILD PERIOD ----------
 async function buildPeriod(env, type, day) {
   const dates = periodDates(type, day);
@@ -788,7 +687,6 @@ function refreshAllowed(request) {
 
   return true;
 }
-
 // ---------- API ROUTER ----------
 async function api(request, env) {
   const url = new URL(request.url);
