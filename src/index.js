@@ -1006,8 +1006,10 @@ export default {
 
       return withSecurity(await env.ASSETS.fetch(request));
     } catch (e) {
+      // TEMPORARY - shows us the real error so we can finally fix the actual cause.
+      // Remove the "debug" field once this is solved.
       return withSecurity(
-        json({ error: 'Interner Fehler. Bitte später erneut versuchen.' }, 500)
+        json({ error: 'Interner Fehler. Bitte später erneut versuchen.', debug: String((e && e.stack) || e) }, 500)
       );
     }
   }
