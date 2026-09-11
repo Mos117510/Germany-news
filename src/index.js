@@ -664,7 +664,7 @@ async function translateSaved(env, type, key, language) {
 
     const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
   messages: [{ role: 'user', content: translationPrompt(language, source) }],
-  max_tokens: 4096,
+  max_tokens: 6144,
   temperature: 0.2
     });
 
@@ -733,7 +733,7 @@ async function translateSaved(env, type, key, language) {
 
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
   messages: [{ role: 'user', content: translationPrompt(language, source) }],
-  max_tokens: 4096,
+  max_tokens: 6144,
   temperature: 0.2
 });
 
@@ -823,10 +823,11 @@ async function api(request, env) {
       `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
        VALUES(?,?,?,?,?)
        ON CONFLICT(day)
-       DO UPDATE SET overview=excluded.overview,
+              DO UPDATE SET overview=excluded.overview,
                      sections_json=excluded.sections_json,
                      articles_json=excluded.articles_json,
-                     updated_at=excluded.updated_at`
+                     updated_at=excluded.updated_at,
+                     translations_json='{}'`
     )
     .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
     .run();
@@ -910,10 +911,11 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         `INSERT INTO period_updates(type,period_key,overview,sections_json,days_json,updated_at)
          VALUES(?,?,?,?,?,?)
          ON CONFLICT(type,period_key)
-         DO UPDATE SET overview=excluded.overview,
+                  DO UPDATE SET overview=excluded.overview,
                        sections_json=excluded.sections_json,
                        days_json=excluded.days_json,
-                       updated_at=excluded.updated_at`
+                       updated_at=excluded.updated_at,
+                       translations_json='{}'`
       )
       .bind(type, data.key, data.overview, JSON.stringify(data.sections), JSON.stringify(data.days), now)
       .run();
