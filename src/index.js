@@ -174,10 +174,10 @@ class EnoughParas extends Error {}
 
 async function articleExtract(item) {
   try {
-    if (!allowedUrl(item.link)) return { ...item, content: item.description };
+    if (!allowedUrl(item.link)) return { ...item, paras: [] };
 
     const r = await safeFetch(item.link, MAX_ARTICLE_BYTES);
-    if (!r.ok) return { ...item, content: item.description };
+    if (!r.ok) return { ...item, paras: [] };
 
     const html = await readTextLimited(r, MAX_ARTICLE_BYTES);
 
@@ -226,7 +226,6 @@ async function articleExtract(item) {
     return { ...item, paras: [] };
   }
 }
-
 // ---------- AI CLEANING ----------
 function cleanAiData(data, allowedLinks) {
   const safeSections = Array.isArray(data?.sections) ? data.sections : [];
@@ -263,11 +262,11 @@ KEINE Einleitung.
 KEINE Codeblöcke.
 KEIN Text außerhalb des JSON.
 
-WICHTIG für "overview": Schreibe 2-3 zusammenhängende Sätze, die die wichtigsten Themen des Tages einordnen. Darf NIEMALS leer sein.
+WICHTIG für "overview": Schreibe 2-3 zusammenhängende Sätze als EIGENSTÄNDIGE, übergeordnete Einordnung des Tages - KEINE Aneinanderreihung der einzelnen Artikel-Zusammenfassungen. Darf NIEMALS leer sein.
 
-WICHTIG für "text" pro Artikel: Schreibe eine ausführliche Zusammenfassung von 3-5 vollständigen Sätzen (keine kurze Andeutung), basierend auf dem gelieferten Inhalt. Nenne konkrete Fakten, Namen und Zusammenhänge aus dem Inhalt. Wiederhole NIEMALS einfach den Titel als "text".
+WICHTIG für "text" pro Artikel: Schreibe eine ausführliche Zusammenfassung von 3-5 vollständigen Sätzen, basierend auf dem gelieferten Inhalt. Nenne konkrete Fakten, Namen und Zusammenhänge aus dem Inhalt. Jede Information darf nur EINMAL vorkommen - schreibe niemals zwei Sätze, die dieselbe Aussage nur anders formuliert wiederholen. Wiederhole NIEMALS einfach den Titel als "text".
 
-Fasse thematisch zusammengehörige Artikel in derselben Sektion zusammen - verwende einen Sektionsnamen nur EINMAL, nicht mehrfach für dasselbe Thema.
+WICHTIG für "sections": Bilde eine Sektion pro übergeordnetem Ereignis/Thema, nicht pro einzelnem Blickwinkel darauf. Wenn mehrere Artikel verschiedene Aspekte DESSELBEN Ereignisses behandeln (z.B. mehrere Artikel zum selben Jahrestag, derselben Wahl oder demselben Konflikt), gehören sie in EINE gemeinsame Sektion mit mehreren Items - nicht in mehrere kleine Sektionen mit je einem Artikel. Bilde nur für wirklich unterschiedliche Themenbereiche (z.B. Innenpolitik vs. Wirtschaft vs. ein komplett anderes internationales Ereignis) eine eigene Sektion. Verwende einen Sektionsnamen nur einmal.
 
 JSON-Struktur:
 
@@ -334,7 +333,26 @@ async function buildUpdate(env, day, previous) {
 
   // Fetch each article's real page and pull out its actual paragraph text -
   // only ~10-12 already-known URLs, so this stays cheap even on the Free plan.
-  const raw = await Promise.all(rawBase.map(a => articleExtract(a)));
+  const rawEnriched = await Promise.all(rawBase.map(a => articleExtract(a)));
+
+  // Some paragraphs are boilerplate/template text that shows up identically across
+  // several different articles (e.g. a recurring "meint XY" commentary teaser) - that
+  // is not real, unique article content, so drop any paragraph seen in more than one
+  // article before building each article's final content.
+  const paraCounts = new Map();
+  for (const a of rawEnriched) {
+    for (const p of new Set(a.paras || [])) {
+      paraCounts.set(p, (paraCounts.get(p) || 0) + 1);
+    }
+  }
+
+  const raw = rawEnriched.map(a => {
+    const uniqueParas = (a.paras || []).filter(p => paraCounts.get(p) === 1);
+    return {
+      ...a,
+      content: uniqueParas.length ? uniqueParas.join(' ') : a.description
+    };
+  });
 
   // ---------- AI ----------
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
@@ -496,8 +514,7 @@ function cleanPeriodData(data, type) {
         : []
     })).filter(s => s.name && s.items.length)
   };
-}
-
+                     }
 // ---------- BUILD PERIOD ----------
 async function buildPeriod(env, type, day) {
   const dates = periodDates(type, day);
@@ -586,14 +603,18 @@ function cleanTranslated(data, source, allowedLinks) {
     sections: sections.slice(0, 8).map((s, si) => ({
       name: clean(String(s?.name || srcSections[si]?.name || '')).slice(0, 80),
       items: Array.isArray(s?.items)
-        ? s.items.slice(0, 100).map((it, ii) => ({
-            title: clean(String(it?.title || srcSections[si]?.items?.[ii]?.title || '')).slice(0, 260),
-            text: clean(String(it?.text || srcSections[si]?.items?.[ii]?.text || '')).slice(0, 3000),
-            urls: Array.isArray(it?.urls)
-              ? it.urls.filter(u => typeof u === 'string' && allowedLinks.has(u)).slice(0, 3)
-              : [],
-            new: Boolean(srcSections[si]?.items?.[ii]?.new)
-          })).filter(it => it.title && it.text)
+        ? s.items.slice(0, 100).map((it, ii) => {
+            const title = clean(String(it?.title || srcSections[si]?.items?.[ii]?.title || '')).slice(0, 260);
+            const rawText = clean(String(it?.text || srcSections[si]?.items?.[ii]?.text || '')).slice(0, 3000);
+            return {
+              title,
+              text: rawText || title, // fall back to the title instead of dropping the item entirely
+              urls: Array.isArray(it?.urls)
+                ? it.urls.filter(u => typeof u === 'string' && allowedLinks.has(u)).slice(0, 3)
+                : [],
+              new: Boolean(srcSections[si]?.items?.[ii]?.new)
+            };
+          }).filter(it => it.title)
         : []
     })).filter(s => s.name && s.items.length)
   };
@@ -653,7 +674,11 @@ async function translateSaved(env, type, key, language) {
     try {
       data = JSON.parse(text);
     } catch {
-      throw new Error('Die Übersetzung war kein gültiges JSON.');
+      return {
+        noNews: true,
+        message: 'Übersetzung war kein gültiges JSON. Bitte erneut versuchen.',
+        rawAiResponse: text
+      };
     }
 
     data = cleanTranslated(data, source, allowedLinks);
@@ -699,37 +724,40 @@ async function translateSaved(env, type, key, language) {
     };
   }
 
- 
   const source = {
     overview: row.overview,
     sections: JSON.parse(row.sections_json)
   };
- 
+
   const allowedLinks = new Set(); // Perioden haben keine URLs
- 
+
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
   messages: [{ role: 'user', content: translationPrompt(language, source) }],
   max_tokens: 4096,
   temperature: 0.2
 });
- 
+
   let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
- 
+
   let data;
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error('Die Übersetzung war kein gültiges JSON.');
+    return {
+      noNews: true,
+      message: 'Übersetzung war kein gültiges JSON. Bitte erneut versuchen.',
+      rawAiResponse: text
+    };
   }
- 
+
   data = cleanTranslated(data, source, allowedLinks);
   translations[language] = data;
- 
+
   await env.DB
     .prepare('UPDATE period_updates SET translations_json=? WHERE type=? AND period_key=?')
     .bind(JSON.stringify(translations), type, key)
     .run();
- 
+
   return {
     language,
     ...data,
@@ -739,29 +767,28 @@ async function translateSaved(env, type, key, language) {
       // ======================================================
 // TEIL 3 — API, Rate-Limits, Security, Worker Export
 // ======================================================
- 
+
 // ---------- RATE LIMITS ----------
 const refreshTimes = new Map();
 const translateTimes = new Map();
- 
+
 function refreshAllowed(request) {
   const key = request.headers.get('CF-Connecting-IP') || 'global';
   const now = Date.now();
   const last = refreshTimes.get(key) || 0;
- 
+
   if (now - last < 30_000) return false;
-  
+
   refreshTimes.set(key, now);
- 
+
   if (refreshTimes.size > 5000) {
     for (const [k, v] of refreshTimes) {
       if (now - v > 300_000) refreshTimes.delete(k);
     }
   }
- 
+
   return true;
 }
- 
 // ---------- API ROUTER ----------
 async function api(request, env) {
   const url = new URL(request.url);
@@ -777,20 +804,20 @@ async function api(request, env) {
       429
     );
   }
- 
+
   const prev = await env.DB
     .prepare('SELECT * FROM daily_updates WHERE day=?')
     .bind(day)
     .first();
- 
+
   const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
- 
+
   const data = await buildUpdate(env, day, old);
- 
+
   if (data.noNews) return json({ day, ...data });
- 
+
   const now = new Date().toISOString();
- 
+
   await env.DB
     .prepare(
       `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
@@ -803,7 +830,7 @@ async function api(request, env) {
     )
     .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
     .run();
- 
+
   return json({ day, ...data, updated_at: now });
  }
   // HISTORY
@@ -811,7 +838,7 @@ async function api(request, env) {
     const rows = await env.DB
       .prepare('SELECT day,overview,sections_json,articles_json,updated_at FROM daily_updates ORDER BY day DESC LIMIT 60')
       .all();
- 
+
     return json(
       rows.results.map(r => ({
         ...r,
@@ -820,7 +847,7 @@ async function api(request, env) {
       }))
     );
   }
- 
+
   // TODAY
   // TODAY
 if (request.method === 'GET' && url.pathname === '/api/today') {
@@ -828,7 +855,7 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
     .prepare('SELECT * FROM daily_updates WHERE day=?')
     .bind(day)
     .first();
- 
+
   return json(
     r
       ? {
@@ -839,18 +866,18 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
       : null
   );
 }
- 
- 
+
+
   // WEEKLY / MONTHLY GET
   if (request.method === 'GET' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
     const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
     const key = periodKey(type, day);
- 
+
     const r = await env.DB
       .prepare('SELECT * FROM period_updates WHERE type=? AND period_key=?')
       .bind(type, key)
       .first();
- 
+
     return json(
       r
         ? {
@@ -861,7 +888,7 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         : null
     );
   }
- 
+
   // WEEKLY / MONTHLY REFRESH
   if (request.method === 'POST' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
     if (!refreshAllowed(request)) {
@@ -870,14 +897,14 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         429
       );
     }
- 
+
     const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
     const data = await buildPeriod(env, type, day);
- 
+
     if (data.noNews) return json(data);
- 
+
     const now = new Date().toISOString();
- 
+
     await env.DB
       .prepare(
         `INSERT INTO period_updates(type,period_key,overview,sections_json,days_json,updated_at)
@@ -890,44 +917,44 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
       )
       .bind(type, data.key, data.overview, JSON.stringify(data.sections), JSON.stringify(data.days), now)
       .run();
- 
+
     return json({ ...data, updated_at: now });
   }
- 
+
   // TRANSLATE
   if (request.method === 'POST' && url.pathname === '/api/translate') {
     const ipKey = request.headers.get('CF-Connecting-IP') || 'global';
     const now = Date.now();
     const last = translateTimes.get(ipKey) || 0;
- 
+
     if (now - last < 3000) {
       return json({ error: 'Bitte kurz warten.' }, 429);
     }
- 
+
     translateTimes.set(ipKey, now);
- 
+
     if (translateTimes.size > 5000) {
       for (const [k, v] of translateTimes) {
         if (now - v > 300000) translateTimes.delete(k);
       }
     }
- 
+
     let body = {};
     try {
       body = await request.json();
     } catch {}
- 
+
     const language = String(body.language || '');
     const type = String(body.type || 'daily');
     const key = String(body.key || day);
- 
+
     if (!LANGS.has(language) || !['daily', 'weekly', 'monthly'].includes(type)) {
       return json({ error: 'Ungültige Sprache oder Ansicht.' }, 400);
     }
- 
+
     return json(await translateSaved(env, type, key, language));
   }
- 
+
   // DAILY REFRESH
   if (request.method === 'POST' && url.pathname === '/api/refresh') {
     if (!refreshAllowed(request)) {
@@ -936,20 +963,20 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         429
       );
     }
- 
+
     const prev = await env.DB
       .prepare('SELECT * FROM daily_updates WHERE day=?')
       .bind(day)
       .first();
- 
+
     const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
- 
+
     const data = await buildUpdate(env, day, old);
- 
+
     if (data.noNews) return json({ day, ...data });
- 
+
     const now = new Date().toISOString();
- 
+
     await env.DB
       .prepare(
         `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
@@ -962,13 +989,13 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
       )
       .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
       .run();
- 
+
     return json({ day, ...data, updated_at: now });
   }
- 
+
   return null;
 }
- 
+
 // ---------- SECURITY HEADERS ----------
 function secureHeaders(headers = new Headers()) {
   headers.set('X-Content-Type-Options', 'nosniff');
@@ -982,7 +1009,7 @@ function secureHeaders(headers = new Headers()) {
   );
   return headers;
 }
- 
+
 function withSecurity(response) {
   const headers = secureHeaders(new Headers(response.headers));
   return new Response(response.body, {
@@ -991,13 +1018,14 @@ function withSecurity(response) {
     headers
   });
 }
+
 // ---------- WORKER EXPORT ----------
 export default {
   async fetch(request, env) {
     try {
       const r = await api(request, env);
       if (r) return withSecurity(r);
- 
+
       return withSecurity(await env.ASSETS.fetch(request));
     } catch (e) {
       // TEMPORARY - shows us the real error so we can finally fix the actual cause.
