@@ -226,6 +226,7 @@ async function articleExtract(item) {
     return { ...item, paras: [] };
   }
 }
+
 // ---------- AI CLEANING ----------
 function cleanAiData(data, allowedLinks) {
   const safeSections = Array.isArray(data?.sections) ? data.sections : [];
@@ -514,7 +515,8 @@ function cleanPeriodData(data, type) {
         : []
     })).filter(s => s.name && s.items.length)
   };
-                     }
+}
+
 // ---------- BUILD PERIOD ----------
 async function buildPeriod(env, type, day) {
   const dates = periodDates(type, day);
@@ -655,21 +657,22 @@ async function translateSaved(env, type, key, language) {
       };
     }
 
+ 
     const source = {
       overview: row.overview,
       sections: JSON.parse(row.sections_json)
     };
-
+ 
     const allowedLinks = new Set(JSON.parse(row.articles_json).map(a => a.link));
-
+ 
     const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
   messages: [{ role: 'user', content: translationPrompt(language, source) }],
-  max_tokens: 6144,
+  max_tokens: 4096,
   temperature: 0.2
     });
-
+ 
     let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
-
+ 
     let data;
     try {
       data = JSON.parse(text);
@@ -680,15 +683,15 @@ async function translateSaved(env, type, key, language) {
         rawAiResponse: text
       };
     }
-
+ 
     data = cleanTranslated(data, source, allowedLinks);
     translations[language] = data;
-
+ 
     await env.DB
       .prepare('UPDATE daily_updates SET translations_json=? WHERE day=?')
       .bind(JSON.stringify(translations), key)
       .run();
-
+ 
     return {
       language,
       day: row.day,
@@ -696,17 +699,17 @@ async function translateSaved(env, type, key, language) {
       failures: []
     };
   }
-
+ 
   // ---------- WEEKLY / MONTHLY ----------
   const row = await env.DB
     .prepare('SELECT * FROM period_updates WHERE type=? AND period_key=?')
     .bind(type, key)
     .first();
-
+ 
   if (!row) return { noNews: true, message: 'No News' };
-
+ 
   const translations = parseTranslations(row.translations_json);
-
+ 
   if (language === 'de') {
     return {
       language,
@@ -715,7 +718,7 @@ async function translateSaved(env, type, key, language) {
       days: JSON.parse(row.days_json)
     };
   }
-
+ 
   if (translations[language]) {
     return {
       language,
@@ -723,22 +726,22 @@ async function translateSaved(env, type, key, language) {
       days: JSON.parse(row.days_json)
     };
   }
-
+ 
   const source = {
     overview: row.overview,
     sections: JSON.parse(row.sections_json)
   };
-
+ 
   const allowedLinks = new Set(); // Perioden haben keine URLs
-
+ 
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
   messages: [{ role: 'user', content: translationPrompt(language, source) }],
-  max_tokens: 6144,
+  max_tokens: 4096,
   temperature: 0.2
 });
-
+ 
   let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
-
+ 
   let data;
   try {
     data = JSON.parse(text);
@@ -749,15 +752,15 @@ async function translateSaved(env, type, key, language) {
       rawAiResponse: text
     };
   }
-
+ 
   data = cleanTranslated(data, source, allowedLinks);
   translations[language] = data;
-
+ 
   await env.DB
     .prepare('UPDATE period_updates SET translations_json=? WHERE type=? AND period_key=?')
     .bind(JSON.stringify(translations), type, key)
     .run();
-
+ 
   return {
     language,
     ...data,
@@ -767,28 +770,30 @@ async function translateSaved(env, type, key, language) {
       // ======================================================
 // TEIL 3 — API, Rate-Limits, Security, Worker Export
 // ======================================================
-
+ 
 // ---------- RATE LIMITS ----------
 const refreshTimes = new Map();
 const translateTimes = new Map();
-
+ 
+    
 function refreshAllowed(request) {
   const key = request.headers.get('CF-Connecting-IP') || 'global';
   const now = Date.now();
   const last = refreshTimes.get(key) || 0;
-
+ 
   if (now - last < 30_000) return false;
-
+ 
   refreshTimes.set(key, now);
-
+ 
   if (refreshTimes.size > 5000) {
     for (const [k, v] of refreshTimes) {
       if (now - v > 300_000) refreshTimes.delete(k);
     }
   }
-
+ 
   return true;
 }
+ 
 // ---------- API ROUTER ----------
 async function api(request, env) {
   const url = new URL(request.url);
@@ -796,13 +801,49 @@ async function api(request, env) {
 // DAILY REFRESH
   
   // DAILY REFRESH
-  
+  if ((request.method === 'POST' || request.method === 'GET') && url.pathname === '/api/refresh')
+ {
+  if (!refreshAllowed(request)) {
+    return json(
+      { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
+      429
+    );
+  }
+ 
+  const prev = await env.DB
+    .prepare('SELECT * FROM daily_updates WHERE day=?')
+    .bind(day)
+    .first();
+ 
+  const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
+ 
+  const data = await buildUpdate(env, day, old);
+ 
+  if (data.noNews) return json({ day, ...data });
+ 
+  const now = new Date().toISOString();
+ 
+  await env.DB
+    .prepare(
+      `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
+       VALUES(?,?,?,?,?)
+       ON CONFLICT(day)
+       DO UPDATE SET overview=excluded.overview,
+                     sections_json=excluded.sections_json,
+                     articles_json=excluded.articles_json,
+                     updated_at=excluded.updated_at`
+    )
+    .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
+    .run();
+ 
+  return json({ day, ...data, updated_at: now });
+ }
   // HISTORY
   if (request.method === 'GET' && url.pathname === '/api/history') {
     const rows = await env.DB
       .prepare('SELECT day,overview,sections_json,articles_json,updated_at FROM daily_updates ORDER BY day DESC LIMIT 60')
       .all();
-
+ 
     return json(
       rows.results.map(r => ({
         ...r,
@@ -811,7 +852,7 @@ async function api(request, env) {
       }))
     );
   }
-
+ 
   // TODAY
   // TODAY
 if (request.method === 'GET' && url.pathname === '/api/today') {
@@ -819,7 +860,7 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
     .prepare('SELECT * FROM daily_updates WHERE day=?')
     .bind(day)
     .first();
-
+ 
   return json(
     r
       ? {
@@ -830,18 +871,40 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
       : null
   );
 }
-
-
+ 
+ 
   // WEEKLY / MONTHLY GET
   if (request.method === 'GET' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
     const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
     const key = periodKey(type, day);
-
+ 
     const r = await env.DB
       .prepare('SELECT * FROM period_updates WHERE type=? AND period_key=?')
       .bind(type, key)
       .first();
-
+ 
+    return json(
+      r
+      ? {
+          ...r,
+          sections: JSON.parse(r.sections_json),
+          articles: JSON.parse(r.articles_json)
+        }
+      : null
+  );
+}
+ 
+ 
+  // WEEKLY / MONTHLY GET
+  if (request.method === 'GET' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
+    const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
+    const key = periodKey(type, day);
+ 
+    const r = await env.DB
+      .prepare('SELECT * FROM period_updates WHERE type=? AND period_key=?')
+      .bind(type, key)
+      .first();
+ 
     return json(
       r
         ? {
@@ -852,7 +915,7 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         : null
     );
   }
-
+ 
   // WEEKLY / MONTHLY REFRESH
   if (request.method === 'POST' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
     if (!refreshAllowed(request)) {
@@ -861,65 +924,64 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         429
       );
     }
-
+ 
     const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
     const data = await buildPeriod(env, type, day);
-
+ 
     if (data.noNews) return json(data);
-
+ 
     const now = new Date().toISOString();
-
+ 
     await env.DB
       .prepare(
         `INSERT INTO period_updates(type,period_key,overview,sections_json,days_json,updated_at)
          VALUES(?,?,?,?,?,?)
          ON CONFLICT(type,period_key)
-                  DO UPDATE SET overview=excluded.overview,
+         DO UPDATE SET overview=excluded.overview,
                        sections_json=excluded.sections_json,
                        days_json=excluded.days_json,
-                       updated_at=excluded.updated_at,
-                       translations_json='{}'`
+                       updated_at=excluded.updated_at`
       )
       .bind(type, data.key, data.overview, JSON.stringify(data.sections), JSON.stringify(data.days), now)
       .run();
-
+ 
     return json({ ...data, updated_at: now });
   }
-
+ 
   // TRANSLATE
   if (request.method === 'POST' && url.pathname === '/api/translate') {
     const ipKey = request.headers.get('CF-Connecting-IP') || 'global';
     const now = Date.now();
     const last = translateTimes.get(ipKey) || 0;
-
+ 
     if (now - last < 3000) {
       return json({ error: 'Bitte kurz warten.' }, 429);
     }
-
+ 
     translateTimes.set(ipKey, now);
-
+ 
     if (translateTimes.size > 5000) {
       for (const [k, v] of translateTimes) {
         if (now - v > 300000) translateTimes.delete(k);
       }
     }
-
+ 
     let body = {};
     try {
       body = await request.json();
     } catch {}
-
+ 
     const language = String(body.language || '');
     const type = String(body.type || 'daily');
     const key = String(body.key || day);
-
+ 
     if (!LANGS.has(language) || !['daily', 'weekly', 'monthly'].includes(type)) {
       return json({ error: 'Ungültige Sprache oder Ansicht.' }, 400);
     }
-
+ 
     return json(await translateSaved(env, type, key, language));
   }
-
+ 
   // DAILY REFRESH
   if (request.method === 'POST' && url.pathname === '/api/refresh') {
     if (!refreshAllowed(request)) {
@@ -928,20 +990,20 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         429
       );
     }
-
+ 
     const prev = await env.DB
       .prepare('SELECT * FROM daily_updates WHERE day=?')
       .bind(day)
       .first();
-
+ 
     const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
-
+ 
     const data = await buildUpdate(env, day, old);
-
+ 
     if (data.noNews) return json({ day, ...data });
-
+ 
     const now = new Date().toISOString();
-
+ 
     await env.DB
       .prepare(
         `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
@@ -954,13 +1016,13 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
       )
       .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
       .run();
-
+ 
     return json({ day, ...data, updated_at: now });
   }
-
+ 
   return null;
 }
-
+ 
 // ---------- SECURITY HEADERS ----------
 function secureHeaders(headers = new Headers()) {
   headers.set('X-Content-Type-Options', 'nosniff');
@@ -974,7 +1036,7 @@ function secureHeaders(headers = new Headers()) {
   );
   return headers;
 }
-
+ 
 function withSecurity(response) {
   const headers = secureHeaders(new Headers(response.headers));
   return new Response(response.body, {
@@ -983,14 +1045,14 @@ function withSecurity(response) {
     headers
   });
 }
-
+ 
 // ---------- WORKER EXPORT ----------
 export default {
   async fetch(request, env) {
     try {
       const r = await api(request, env);
       if (r) return withSecurity(r);
-
+ 
       return withSecurity(await env.ASSETS.fetch(request));
     } catch (e) {
       // TEMPORARY - shows us the real error so we can finally fix the actual cause.
@@ -1000,4 +1062,4 @@ export default {
       );
     }
   }
-};
+}
