@@ -141,8 +141,6 @@ function parseRssFeed(xml, feedUrl, sourceName) {
     const published = stripCdata(item.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)?.[1] || '');
 
     const url = absUrl(feedUrl, link);
-    // Skip video-only entries and anything with too little description text to summarize
-    // meaningfully - these are what produced thin, uninformative summaries before.
     const isVideo = url && /\/video[-/]/i.test(url);
     if (title && url && !isVideo && description.length >= 40) {
       out.push({ source: sourceName, title, link: url, description, published });
@@ -174,10 +172,10 @@ class EnoughParas extends Error {}
 
 async function articleExtract(item) {
   try {
-    if (!allowedUrl(item.link)) return { ...item, content: item.description };
+    if (!allowedUrl(item.link)) return { ...item, paras: [] };
 
     const r = await safeFetch(item.link, MAX_ARTICLE_BYTES);
-    if (!r.ok) return { ...item, content: item.description };
+    if (!r.ok) return { ...item, paras: [] };
 
     const html = await readTextLimited(r, MAX_ARTICLE_BYTES);
 
@@ -202,8 +200,6 @@ async function articleExtract(item) {
             const x = clean(p);
             if (x.length >= 60) {
               paras.push(x);
-              // Stop parsing the moment we have enough - this is what keeps this cheap
-              // even though we're now fetching real article pages again.
               if (paras.length >= 6) { inP = false; throw new EnoughParas(); }
             }
           }
@@ -241,7 +237,7 @@ function cleanAiData(data, allowedLinks) {
             const rawText = clean(String(it?.text || '')).slice(0, 1200);
             return {
               title,
-              text: rawText || title, // AI sometimes leaves text empty - fall back to the title rather than dropping the item
+              text: rawText || title,
               urls: Array.isArray(it?.urls)
                 ? it.urls.filter(u => typeof u === 'string' && allowedLinks.has(u)).slice(0, 3)
                 : []
@@ -254,7 +250,7 @@ function cleanAiData(data, allowedLinks) {
 
 // ---------- AI PROMPT ----------
 function promptFor(raw, day) {
-  const limited = raw.slice(0, 10); // Maximal 10 Artikel
+  const limited = raw.slice(0, 10);
 
   return `
 Gib NUR ein gültiges JSON zurück.
@@ -304,7 +300,6 @@ async function buildUpdate(env, day, previous) {
   let spiegel = [];
   const failures = [];
 
-  // Load sources
   const sourceResults = await Promise.allSettled([rssItems(), spiegelItems()]);
 
   if (sourceResults[0].status === 'fulfilled') ts = sourceResults[0].value;
@@ -313,7 +308,6 @@ async function buildUpdate(env, day, previous) {
   if (sourceResults[1].status === 'fulfilled') spiegel = sourceResults[1].value;
   else failures.push('spiegel.de');
 
-  // If both failed → no news
   if (failures.length === 2) {
     return {
       noNews: true,
@@ -334,9 +328,27 @@ async function buildUpdate(env, day, previous) {
 
   // Fetch each article's real page and pull out its actual paragraph text -
   // only ~10-12 already-known URLs, so this stays cheap even on the Free plan.
-  const raw = await Promise.all(rawBase.map(a => articleExtract(a)));
+  const rawEnriched = await Promise.all(rawBase.map(a => articleExtract(a)));
 
-  // ---------- AI ----------
+  // Some paragraphs are boilerplate/template text that shows up identically across
+  // several different articles (e.g. a recurring "meint XY" commentary teaser) - that
+  // is not real, unique article content, so drop any paragraph seen in more than one
+  // article before building each article's final content.
+  const paraCounts = new Map();
+  for (const a of rawEnriched) {
+    for (const p of new Set(a.paras || [])) {
+      paraCounts.set(p, (paraCounts.get(p) || 0) + 1);
+    }
+  }
+
+  const raw = rawEnriched.map(a => {
+    const uniqueParas = (a.paras || []).filter(p => paraCounts.get(p) === 1);
+    return {
+      ...a,
+      content: uniqueParas.length ? uniqueParas.join(' ') : a.description
+    };
+  });
+
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [{ role: 'user', content: promptFor(raw, day) }],
     max_tokens: 3072
@@ -346,7 +358,6 @@ async function buildUpdate(env, day, previous) {
   ? ai.response.trim()
   : JSON.stringify(ai?.response || '').trim();
 
-  // KI liefert nichts
   if (!text) {
     return {
       noNews: true,
@@ -355,7 +366,6 @@ async function buildUpdate(env, day, previous) {
     };
   }
 
-  // Codeblock entfernen
   text = text.replace(/^```json\s*|\s*```$/g, '').trim();
 
     let data;
@@ -381,7 +391,6 @@ async function buildUpdate(env, day, previous) {
   const rawParsed = data;
   data = cleanAiData(data, allowedLinks);
 
-  // TEMPORARY DEBUG - cleaning wiped out every section; show what the AI actually sent
   if (!data.sections.length) {
     return {
       noNews: true,
@@ -411,8 +420,6 @@ async function buildUpdate(env, day, previous) {
 // ======================================================
 // TEIL 2 — Perioden-Logik & Übersetzungen (FREE PLAN)
 // ======================================================
-
-// ---------- PERIOD KEY ----------
 function periodKey(type, day) {
   const [y, m, d] = day.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
@@ -423,11 +430,9 @@ function periodKey(type, day) {
     return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
   }
 
-  // monthly
   return `${y}-${String(m).padStart(2, '0')}`;
 }
 
-// ---------- PERIOD DATES ----------
 function periodDates(type, day) {
   const [y, m, d] = day.split('-').map(Number);
   const end = new Date(Date.UTC(y, m - 1, d));
@@ -447,7 +452,6 @@ function periodDates(type, day) {
   return dates;
 }
 
-// ---------- PERIOD PROMPT ----------
 function periodPrompt(type, key, dailyRows) {
   const weekly = type === 'weekly';
   const target = weekly ? '1200-2200' : '4500-8000';
@@ -474,7 +478,6 @@ ${JSON.parse(r.sections_json).map(s =>
 ).join('\n\n')}`;
 }
 
-// ---------- CLEAN PERIOD DATA ----------
 function cleanPeriodData(data, type) {
   const maxSections = 8;
   const maxItems = type === 'weekly' ? 40 : 100;
@@ -498,7 +501,6 @@ function cleanPeriodData(data, type) {
   };
 }
 
-// ---------- BUILD PERIOD ----------
 async function buildPeriod(env, type, day) {
   const dates = periodDates(type, day);
 
@@ -542,11 +544,6 @@ async function buildPeriod(env, type, day) {
     days: dates.filter(d => rows.results.some(r => r.day === d))
   };
 }
-
-// ======================================================
-// TRANSLATIONS
-// ======================================================
-
 const LANGS = new Set(['de', 'en', 'ar']);
 
 function parseTranslations(raw) {
@@ -557,49 +554,73 @@ function parseTranslations(raw) {
   }
 }
 
-// ---------- TRANSLATION PROMPT ----------
-function translationPrompt(language, source) {
+function flattenForTranslation(source) {
+  const list = [source.overview || ''];
+  for (const s of source.sections || []) {
+    list.push(s.name || '');
+    for (const it of s.items || []) {
+      list.push(it.title || '');
+      list.push(it.text || '');
+    }
+  }
+  return list;
+}
+
+function rebuildFromTranslation(source, translatedList) {
+  const list = Array.isArray(translatedList) ? translatedList : [];
+  let i = 0;
+  const next = fallback => {
+    const v = list[i++];
+    return (typeof v === 'string' && v.trim()) ? v : fallback;
+  };
+
+  const overview = next(source.overview || '');
+  const sections = (source.sections || []).map(s => {
+    const name = next(s.name || '');
+    const items = (s.items || []).map(it => {
+      const title = next(it.title || '');
+      const text = next(it.text || '');
+      return { ...it, title, text };
+    });
+    return { ...s, name, items };
+  });
+
+  return { overview, sections };
+}
+
+function translationPrompt(language, list) {
   const names = {
     de: 'Deutsch',
     en: 'English',
     ar: 'العربية'
   };
 
-  return `Übersetze den folgenden geprüften Deutschland-News-Text vollständig ins ${names[language]}.
+  return `Übersetze jeden der folgenden nummerierten deutschen Texte einzeln und vollständig ins ${names[language]}. Keine neuen Fakten, keine Kürzungen, keine Zusammenfassung - jeder Eintrag bleibt ein eigener, vollständig übersetzter Text an genau derselben Position.
 
-Keine neuen Fakten. Keine Kürzungen. Struktur exakt beibehalten.
+Gib NUR ein JSON-Array mit genau ${list.length} Strings zurück, in exakt derselben Reihenfolge wie unten. Kein Text davor oder danach, keine Codeblöcke, keine Erklärungen.
 
-Ausgabe als JSON:
-{"overview":"...","sections":[{"name":"...","items":[{"title":"...","text":"...","urls":["..."]}]}]}
-
-TEXT:
-${JSON.stringify(source)}`;
+TEXTE:
+${list.map((t, i) => `${i + 1}. ${t}`).join('\n')}`;
 }
 
-// ---------- CLEAN TRANSLATED ----------
-function cleanTranslated(data, source, allowedLinks) {
-  const srcSections = Array.isArray(source.sections) ? source.sections : [];
-  const sections = Array.isArray(data?.sections) ? data.sections : [];
-
+function cleanTranslatedStructure(rebuilt, allowedLinks) {
   return {
-    overview: clean(String(data?.overview || '')).slice(0, 14000),
-    sections: sections.slice(0, 8).map((s, si) => ({
-      name: clean(String(s?.name || srcSections[si]?.name || '')).slice(0, 80),
-      items: Array.isArray(s?.items)
-        ? s.items.slice(0, 100).map((it, ii) => ({
-            title: clean(String(it?.title || srcSections[si]?.items?.[ii]?.title || '')).slice(0, 260),
-            text: clean(String(it?.text || srcSections[si]?.items?.[ii]?.text || '')).slice(0, 3000),
-            urls: Array.isArray(it?.urls)
-              ? it.urls.filter(u => typeof u === 'string' && allowedLinks.has(u)).slice(0, 3)
-              : [],
-            new: Boolean(srcSections[si]?.items?.[ii]?.new)
-          })).filter(it => it.title && it.text)
-        : []
+    overview: clean(String(rebuilt?.overview || '')).slice(0, 14000),
+    sections: (rebuilt?.sections || []).slice(0, 8).map(s => ({
+      name: clean(String(s?.name || '')).slice(0, 80),
+      items: (s?.items || []).slice(0, 100).map(it => ({
+        title: clean(String(it?.title || '')).slice(0, 260),
+        text: clean(String(it?.text || '')).slice(0, 3000),
+        urls: Array.isArray(it?.urls)
+          ? it.urls.filter(u => typeof u === 'string' && allowedLinks.has(u)).slice(0, 3)
+          : [],
+        new: Boolean(it?.new),
+        days: Array.isArray(it?.days) ? it.days : undefined
+      })).filter(it => it.title)
     })).filter(s => s.name && s.items.length)
   };
 }
 
-// ---------- TRANSLATE SAVED ----------
 async function translateSaved(env, type, key, language) {
   if (!LANGS.has(language)) {
     throw new Error('Nicht unterstützte Sprache');
@@ -641,22 +662,28 @@ async function translateSaved(env, type, key, language) {
 
     const allowedLinks = new Set(JSON.parse(row.articles_json).map(a => a.link));
 
+    const list = flattenForTranslation(source);
     const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
-  messages: [{ role: 'user', content: translationPrompt(language, source) }],
-  max_tokens: 4096,
-  temperature: 0.2
+      messages: [{ role: 'user', content: translationPrompt(language, list) }],
+      max_tokens: 6144,
+      temperature: 0.2
     });
 
     let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
 
-    let data;
+    let translatedList;
     try {
-      data = JSON.parse(text);
+      translatedList = JSON.parse(text);
     } catch {
-      throw new Error('Die Übersetzung war kein gültiges JSON.');
+      return {
+        noNews: true,
+        message: 'Übersetzung war kein gültiges JSON. Bitte erneut versuchen.',
+        rawAiResponse: text
+      };
     }
 
-    data = cleanTranslated(data, source, allowedLinks);
+    const rebuilt = rebuildFromTranslation(source, translatedList);
+    const data = cleanTranslatedStructure(rebuilt, allowedLinks);
     translations[language] = data;
 
     await env.DB
@@ -672,7 +699,6 @@ async function translateSaved(env, type, key, language) {
     };
   }
 
-  // ---------- WEEKLY / MONTHLY ----------
   const row = await env.DB
     .prepare('SELECT * FROM period_updates WHERE type=? AND period_key=?')
     .bind(type, key)
@@ -699,78 +725,74 @@ async function translateSaved(env, type, key, language) {
     };
   }
 
-
-
- 
   const source = {
     overview: row.overview,
     sections: JSON.parse(row.sections_json)
   };
- 
-  const allowedLinks = new Set(); // Perioden haben keine URLs
- 
+
+  const allowedLinks = new Set();
+
+  const list = flattenForTranslation(source);
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
-  messages: [{ role: 'user', content: translationPrompt(language, source) }],
-  max_tokens: 4096,
-  temperature: 0.2
-});
- 
+    messages: [{ role: 'user', content: translationPrompt(language, list) }],
+    max_tokens: 6144,
+    temperature: 0.2
+  });
+
   let text = (ai?.response || '').replace(/^```json\s*|\s*```$/g, '').trim();
- 
-  let data;
+
+  let translatedList;
   try {
-    data = JSON.parse(text);
+    translatedList = JSON.parse(text);
   } catch {
-    throw new Error('Die Übersetzung war kein gültiges JSON.');
+    return {
+      noNews: true,
+      message: 'Übersetzung war kein gültiges JSON. Bitte erneut versuchen.',
+      rawAiResponse: text
+    };
   }
- 
-  data = cleanTranslated(data, source, allowedLinks);
+
+  const rebuilt = rebuildFromTranslation(source, translatedList);
+  const data = cleanTranslatedStructure(rebuilt, allowedLinks);
   translations[language] = data;
- 
+
   await env.DB
     .prepare('UPDATE period_updates SET translations_json=? WHERE type=? AND period_key=?')
     .bind(JSON.stringify(translations), type, key)
     .run();
- 
+
   return {
     language,
     ...data,
     days: JSON.parse(row.days_json)
   };
-    }
-      // ======================================================
-// TEIL 3 — API, Rate-Limits, Security, Worker Export
-// ======================================================
- 
-// ---------- RATE LIMITS ----------
+}
+
 const refreshTimes = new Map();
 const translateTimes = new Map();
- 
+
 function refreshAllowed(request) {
   const key = request.headers.get('CF-Connecting-IP') || 'global';
   const now = Date.now();
   const last = refreshTimes.get(key) || 0;
- 
+
   if (now - last < 30_000) return false;
-  
+
   refreshTimes.set(key, now);
- 
+
   if (refreshTimes.size > 5000) {
     for (const [k, v] of refreshTimes) {
       if (now - v > 300_000) refreshTimes.delete(k);
     }
   }
- 
+
   return true;
 }
- 
-// ---------- API ROUTER ----------
+
 async function api(request, env) {
   const url = new URL(request.url);
   const day = todayBerlin();
-// DAILY REFRESH
-  
-  // DAILY REFRESH
+
   if ((request.method === 'POST' || request.method === 'GET') && url.pathname === '/api/refresh')
  {
   if (!refreshAllowed(request)) {
@@ -779,20 +801,20 @@ async function api(request, env) {
       429
     );
   }
- 
+
   const prev = await env.DB
     .prepare('SELECT * FROM daily_updates WHERE day=?')
     .bind(day)
     .first();
- 
+
   const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
- 
+
   const data = await buildUpdate(env, day, old);
- 
+
   if (data.noNews) return json({ day, ...data });
- 
+
   const now = new Date().toISOString();
- 
+
   await env.DB
     .prepare(
       `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
@@ -801,19 +823,19 @@ async function api(request, env) {
        DO UPDATE SET overview=excluded.overview,
                      sections_json=excluded.sections_json,
                      articles_json=excluded.articles_json,
-                     updated_at=excluded.updated_at`
+                     updated_at=excluded.updated_at,
+                     translations_json='{}'`
     )
     .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
     .run();
- 
+
   return json({ day, ...data, updated_at: now });
  }
-  // HISTORY
   if (request.method === 'GET' && url.pathname === '/api/history') {
     const rows = await env.DB
       .prepare('SELECT day,overview,sections_json,articles_json,updated_at FROM daily_updates ORDER BY day DESC LIMIT 60')
       .all();
- 
+
     return json(
       rows.results.map(r => ({
         ...r,
@@ -822,15 +844,13 @@ async function api(request, env) {
       }))
     );
   }
- 
-  // TODAY
-  // TODAY
+
 if (request.method === 'GET' && url.pathname === '/api/today') {
   const r = await env.DB
     .prepare('SELECT * FROM daily_updates WHERE day=?')
     .bind(day)
     .first();
- 
+
   return json(
     r
       ? {
@@ -841,18 +861,16 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
       : null
   );
 }
- 
- 
-  // WEEKLY / MONTHLY GET
+
   if (request.method === 'GET' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
     const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
     const key = periodKey(type, day);
- 
+
     const r = await env.DB
       .prepare('SELECT * FROM period_updates WHERE type=? AND period_key=?')
       .bind(type, key)
       .first();
- 
+
     return json(
       r
         ? {
@@ -863,8 +881,7 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         : null
     );
   }
- 
-  // WEEKLY / MONTHLY REFRESH
+
   if (request.method === 'POST' && (url.pathname === '/api/weekly' || url.pathname === '/api/monthly')) {
     if (!refreshAllowed(request)) {
       return json(
@@ -872,14 +889,14 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
         429
       );
     }
- 
+
     const type = url.pathname === '/api/weekly' ? 'weekly' : 'monthly';
     const data = await buildPeriod(env, type, day);
- 
+
     if (data.noNews) return json(data);
- 
+
     const now = new Date().toISOString();
- 
+
     await env.DB
       .prepare(
         `INSERT INTO period_updates(type,period_key,overview,sections_json,days_json,updated_at)
@@ -888,90 +905,51 @@ if (request.method === 'GET' && url.pathname === '/api/today') {
          DO UPDATE SET overview=excluded.overview,
                        sections_json=excluded.sections_json,
                        days_json=excluded.days_json,
-                       updated_at=excluded.updated_at`
+                       updated_at=excluded.updated_at,
+                       translations_json='{}'`
       )
       .bind(type, data.key, data.overview, JSON.stringify(data.sections), JSON.stringify(data.days), now)
       .run();
- 
+
     return json({ ...data, updated_at: now });
   }
- 
-  // TRANSLATE
+
   if (request.method === 'POST' && url.pathname === '/api/translate') {
     const ipKey = request.headers.get('CF-Connecting-IP') || 'global';
     const now = Date.now();
     const last = translateTimes.get(ipKey) || 0;
- 
+
     if (now - last < 3000) {
       return json({ error: 'Bitte kurz warten.' }, 429);
     }
- 
+
     translateTimes.set(ipKey, now);
- 
+
     if (translateTimes.size > 5000) {
       for (const [k, v] of translateTimes) {
         if (now - v > 300000) translateTimes.delete(k);
       }
     }
- 
+
     let body = {};
     try {
       body = await request.json();
     } catch {}
- 
+
     const language = String(body.language || '');
     const type = String(body.type || 'daily');
     const key = String(body.key || day);
- 
+
     if (!LANGS.has(language) || !['daily', 'weekly', 'monthly'].includes(type)) {
       return json({ error: 'Ungültige Sprache oder Ansicht.' }, 400);
     }
- 
+
     return json(await translateSaved(env, type, key, language));
   }
- 
-  // DAILY REFRESH
-  if (request.method === 'POST' && url.pathname === '/api/refresh') {
-    if (!refreshAllowed(request)) {
-      return json(
-        { error: 'Bitte kurz warten und dann erneut aktualisieren.' },
-        429
-      );
-    }
- 
-    const prev = await env.DB
-      .prepare('SELECT * FROM daily_updates WHERE day=?')
-      .bind(day)
-      .first();
- 
-    const old = prev ? { articles: JSON.parse(prev.articles_json) } : null;
- 
-    const data = await buildUpdate(env, day, old);
- 
-    if (data.noNews) return json({ day, ...data });
- 
-    const now = new Date().toISOString();
- 
-    await env.DB
-      .prepare(
-        `INSERT INTO daily_updates(day,overview,sections_json,articles_json,updated_at)
-         VALUES(?,?,?,?,?)
-         ON CONFLICT(day)
-         DO UPDATE SET overview=excluded.overview,
-                       sections_json=excluded.sections_json,
-                       articles_json=excluded.articles_json,
-                       updated_at=excluded.updated_at`
-      )
-      .bind(day, data.overview, JSON.stringify(data.sections), JSON.stringify(data.articles), now)
-      .run();
- 
-    return json({ day, ...data, updated_at: now });
-  }
- 
+
   return null;
 }
- 
-// ---------- SECURITY HEADERS ----------
+
 function secureHeaders(headers = new Headers()) {
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('X-Frame-Options', 'DENY');
@@ -984,7 +962,7 @@ function secureHeaders(headers = new Headers()) {
   );
   return headers;
 }
- 
+
 function withSecurity(response) {
   const headers = secureHeaders(new Headers(response.headers));
   return new Response(response.body, {
@@ -993,17 +971,14 @@ function withSecurity(response) {
     headers
   });
 }
-// ---------- WORKER EXPORT ----------
 export default {
   async fetch(request, env) {
     try {
       const r = await api(request, env);
       if (r) return withSecurity(r);
- 
+
       return withSecurity(await env.ASSETS.fetch(request));
     } catch (e) {
-      // TEMPORARY - shows us the real error so we can finally fix the actual cause.
-      // Remove the "debug" field once this is solved.
       return withSecurity(
         json({ error: 'Interner Fehler. Bitte später erneut versuchen.', debug: String((e && e.stack) || e) }, 500)
       );
