@@ -665,7 +665,7 @@ async function translateSaved(env, type, key, language) {
     const list = flattenForTranslation(source);
     const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
       messages: [{ role: 'user', content: translationPrompt(language, list) }],
-      max_tokens: 6144,
+      max_tokens: 9000,
       temperature: 0.2
     });
 
@@ -735,7 +735,7 @@ async function translateSaved(env, type, key, language) {
   const list = flattenForTranslation(source);
   const ai = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fast', {
     messages: [{ role: 'user', content: translationPrompt(language, list) }],
-    max_tokens: 6144,
+    max_tokens: 9000,
     temperature: 0.2
   });
 
